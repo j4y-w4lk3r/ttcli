@@ -1,0 +1,13 @@
+# Build output
+/ttcli
+/dist/
+*.exe
+
+# Secrets — captured TickTick sessions must never be committed
+ticktick_auth.json
+.ticktick_auth.json
+*.auth.json
+
+# Go
+*.test
+*.out
