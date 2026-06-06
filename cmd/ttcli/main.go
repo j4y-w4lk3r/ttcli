@@ -17,8 +17,13 @@ import (
 	"github.com/j4y-w4lk3r/ttcli/internal/ticktick"
 )
 
-// version is overridden at build time via -ldflags "-X main.version=...".
-var version = "dev"
+// Build metadata, overridden at release time via goreleaser ldflags
+// (-X main.version / main.commit / main.date).
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
 
 func main() {
 	if len(os.Args) < 2 {
@@ -30,7 +35,7 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "version", "--version", "-v":
-		fmt.Printf("ttcli %s\n", version)
+		fmt.Printf("ttcli %s (commit %s, built %s)\n", version, commit, date)
 		return
 	case "help", "-h", "--help":
 		usage()

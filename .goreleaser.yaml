@@ -1,0 +1,156 @@
+# goreleaser config for ttcli (mirrors the bmcctl setup).
+#
+# Triggered by `.github/workflows/release.yml` on `git push origin vX.Y.Z`:
+#   1. Cross-compiles `cmd/ttcli` for darwin/linux/windows × amd64/arm64 (+ linux/armv7).
+#   2. Tarballs each binary with LICENSE + README.md alongside.
+#   3. Computes checksums.txt over all archives.
+#   4. Creates the GitHub release with all artifacts attached.
+#   5. Renders Casks/ttcli.rb pointing at the per-platform tarballs and
+#      pushes it to j4y-w4lk3r/homebrew-ttcli (auth via HOMEBREW_TAP_GITHUB_TOKEN).
+#   6. Renders ttcli-bin AUR PKGBUILD + .SRCINFO and pushes to
+#      ssh://aur@aur.archlinux.org/ttcli-bin.git (auth via AUR_SSH_PRIVATE_KEY).
+#
+# Local dry-run (no publish, builds in dist/):
+#   goreleaser release --snapshot --clean
+# Local single-arch build (fastest sanity check):
+#   goreleaser build --snapshot --clean --single-target
+
+version: 2
+
+project_name: ttcli
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: ttcli
+    main: ./cmd/ttcli
+    binary: ttcli
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+      - arm
+    goarm:
+      # Pi 2/3, most Cortex-A SBCs. v6 (Pi 1, Pi Zero) too rare to bother.
+      - "7"
+    ignore:
+      # darwin/arm doesn't exist (Apple is arm64-only).
+      - goos: darwin
+        goarch: arm
+      # Skip 32-bit + 64-bit Windows ARM (audience essentially zero today).
+      - goos: windows
+        goarch: arm
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: ttcli
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    # Format examples:
+    #   ttcli_0.1.0_Darwin_arm64.tar.gz
+    #   ttcli_0.1.0_Linux_armv7.tar.gz
+    #   ttcli_0.1.0_Windows_x86_64.zip
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if and (eq .Arch "arm") (eq .Arm "7") }}armv7
+      {{- else }}{{ .Arch }}{{ end }}
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - '^ci:'
+      - 'merge conflict'
+      - '(?i)^typo'
+
+# Auto-publishes a Homebrew Cask to j4y-w4lk3r/homebrew-ttcli. Requires
+# repo secret HOMEBREW_TAP_GITHUB_TOKEN (PAT with Contents:write on the tap).
+#
+# Cask (not Formula) is the right mode for prebuilt binaries; goreleaser
+# deprecated `brews:` in v2.16. Install:
+#   brew install --cask j4y-w4lk3r/ttcli/ttcli
+#
+# Quarantine bit: macOS Gatekeeper sets com.apple.quarantine on Homebrew
+# downloads. ttcli is not notarized (no Apple dev fee for a personal CLI),
+# so the post-install hook strips the bit so the binary runs.
+homebrew_casks:
+  - name: ttcli
+    binaries:
+      - ttcli
+    repository:
+      owner: j4y-w4lk3r
+      name: homebrew-ttcli
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/j4y-w4lk3r/ttcli"
+    description: "TickTick from the terminal: tasks, lists, pomodoro/focus — headless session auth with auto-refresh."
+    commit_author:
+      name: ttcli-release-bot
+      email: ttcli-release-bot@users.noreply.github.com
+    commit_msg_template: "ttcli: bump to {{ .Tag }}"
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/ttcli"]
+          end
+
+# Auto-publishes the AUR package `ttcli-bin` to aur.archlinux.org on every
+# release. Pulls the linux/amd64 archive, generates a PKGBUILD + .SRCINFO
+# referencing it by URL+SHA256, and pushes via SSH using AUR_SSH_PRIVATE_KEY.
+aurs:
+  - name: ttcli-bin
+    homepage: "https://github.com/j4y-w4lk3r/ttcli"
+    description: "TickTick CLI: tasks, lists, pomodoro/focus over the private web API."
+    maintainers:
+      - "j4y <j4y_w4lk3r@pobox.com>"
+    license: "MIT"
+    private_key: '{{ .Env.AUR_SSH_PRIVATE_KEY }}'
+    git_url: "ssh://aur@aur.archlinux.org/ttcli-bin.git"
+    skip_upload: false
+    provides:
+      - ttcli
+    conflicts:
+      - ttcli
+      - ttcli-git
+    depends:
+      - glibc
+    commit_author:
+      name: ttcli-release-bot
+      email: ttcli-release-bot@users.noreply.github.com
+    commit_msg_template: "ttcli-bin: bump to {{ .Tag }}"
+    package: |-
+      install -Dm755 "./ttcli" "${pkgdir}/usr/bin/ttcli"
+
+      install -Dm644 "./LICENSE"   "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+      install -Dm644 "./README.md" "${pkgdir}/usr/share/doc/${pkgname}/README.md"
