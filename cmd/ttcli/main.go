@@ -9,12 +9,15 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/j4y-w4lk3r/ttcli/internal/ticktick"
+	"github.com/j4y-w4lk3r/ttcli/internal/webhook"
 )
 
 // Build metadata, overridden at release time via goreleaser ldflags
@@ -54,6 +57,10 @@ func main() {
 		err = cmdRm(args)
 	case "focus":
 		err = cmdFocus(args)
+	case "pomo":
+		err = cmdPomo(args)
+	case "serve", "webhook":
+		err = cmdServe(args)
 	case "raw":
 		err = cmdRaw(args)
 	default:
@@ -78,6 +85,9 @@ usage:
   ttcli done <project> <task-id>    mark a task complete
   ttcli rm <project> <task-id>      delete a task
   ttcli focus [YYYY-MM-DD]          pomodoro/focus summary for a day (default today)
+  ttcli focus --short               print N/GOAL only (for tmux status; goal=$TTCLI_POMO_GOAL or 30)
+  ttcli pomo                        alias for: ttcli focus --short
+  ttcli serve [-addr HOST:PORT]     local webhook (POST /hooks/pomo → refresh tmux)
   ttcli raw <api-path>              GET an arbitrary /api/... path (debug)
   ttcli version
 
@@ -235,13 +245,14 @@ func cmdRm(args []string) error {
 }
 
 func cmdFocus(args []string) error {
-	var day time.Time
-	if len(args) >= 1 {
-		d, err := time.Parse("2006-01-02", args[0])
-		if err != nil {
-			return fmt.Errorf("bad date %q (want YYYY-MM-DD): %w", args[0], err)
-		}
-		day = d
+	fs := flag.NewFlagSet("focus", flag.ExitOnError)
+	short := fs.Bool("short", false, "print N/GOAL only (for scripts/tmux)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	day, err := parseFocusDay(fs.Args())
+	if err != nil {
+		return err
 	}
 	c, err := client()
 	if err != nil {
@@ -250,6 +261,12 @@ func cmdFocus(args []string) error {
 	s, err := c.FocusForDay(day)
 	if err != nil {
 		return err
+	}
+	writePomoCache(s.PomoCount)
+	runPomoPush(s.PomoCount)
+	if *short {
+		fmt.Println(formatPomoStatus(s.PomoCount))
+		return nil
 	}
 	mins := s.TotalSeconds / 60
 	fmt.Printf("%s — %d pomodoro(s), %dh%02dm focused\n", s.Date, s.PomoCount, mins/60, mins%60)
@@ -266,6 +283,86 @@ func cmdFocus(args []string) error {
 		fmt.Fprintf(w, "  %s\t%s\n", start, title)
 	}
 	return w.Flush()
+}
+
+func cmdPomo(args []string) error {
+	all := append([]string{"--short"}, args...)
+	return cmdFocus(all)
+}
+
+func cmdServe(args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	addr := fs.String("addr", envOr("TTCLI_WEBHOOK_ADDR", "127.0.0.1:8787"), "listen address")
+	secret := fs.String("secret", os.Getenv("TTCLI_WEBHOOK_SECRET"), "optional bearer token")
+	push := fs.String("push-script", envOr("TTCLI_POMO_PUSH_SCRIPT", ""), "script to update tmux (default ~/.config/zsh/ttcli-pomo-push.sh)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg := webhook.Config{Addr: *addr, Secret: *secret, PushScript: *push}
+	return webhook.Serve(cfg)
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func parseFocusDay(args []string) (time.Time, error) {
+	if len(args) >= 1 {
+		d, err := time.Parse("2006-01-02", args[0])
+		if err != nil {
+			return time.Time{}, fmt.Errorf("bad date %q (want YYYY-MM-DD): %w", args[0], err)
+		}
+		return d, nil
+	}
+	return time.Time{}, nil
+}
+
+func pomoGoal() int {
+	if g := os.Getenv("TTCLI_POMO_GOAL"); g != "" {
+		if n, err := strconv.Atoi(g); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 30
+}
+
+func formatPomoStatus(count int) string {
+	return fmt.Sprintf("%d/%d", count, pomoGoal())
+}
+
+func writePomoCache(count int) {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return
+	}
+	dir = filepath.Join(dir, "ttcli")
+	_ = os.MkdirAll(dir, 0o755)
+	path := filepath.Join(dir, "pomo-status")
+	f, err := os.Create(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%d %d\n", count, time.Now().Unix())
+}
+
+func runPomoPush(count int) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	script := os.Getenv("TTCLI_POMO_PUSH_SCRIPT")
+	if script == "" {
+		script = filepath.Join(home, ".config", "zsh", "ttcli-pomo-push.sh")
+	}
+	if _, err := os.Stat(script); err != nil {
+		return
+	}
+	cmd := exec.Command("/bin/bash", script, strconv.Itoa(count))
+	_ = cmd.Run()
 }
 
 func cmdRaw(args []string) error {
