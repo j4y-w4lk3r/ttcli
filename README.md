@@ -10,25 +10,67 @@ records, designed to plug into a self-hosted planning + learning loop.
 
 ## Install
 
+**Release binary** (versioned builds from GitHub releases):
+
 ```bash
-go install github.com/j4y-w4lk3r/ttcli/cmd/ttcli@latest
+# Homebrew (macOS)
+brew install --cask j4y-w4lk3r/ttcli/ttcli
+
+# Or download a tarball from https://github.com/j4y-w4lk3r/ttcli/releases
 ```
 
-Homebrew tap and AUR package are planned (same flow as `bmcctl`).
+**From source** (stamps git describe into the binary):
+
+```bash
+git clone https://github.com/j4y-w4lk3r/ttcli.git && cd ttcli
+make install          # → $(go env GOPATH)/bin/ttcli
+# or: make build && ./ttcli version
+```
+
+Plain `go install github.com/j4y-w4lk3r/ttcli/cmd/ttcli@latest` also works; `ttcli
+version` falls back to the module pseudo-version and embedded git metadata when
+release ldflags are not set.
+
+Check version: `ttcli version` (also `ttcli -v`, `ttcli --version`).
+
+## Releases
+
+Versioning is **semver tags** (`v0.1.0`, `v0.2.0`, …):
+
+1. Tag on `main`: `git tag v0.1.0 && git push origin v0.1.0`
+2. GitHub Actions runs [GoReleaser](.goreleaser.yaml): cross-compiled tarballs,
+   GitHub release, Homebrew cask bump, AUR `ttcli-bin` push.
+3. Local dry-run: `make release-snapshot` (writes to `dist/`).
+
+CI on every push/PR runs tests plus `goreleaser build --snapshot` so release
+config stays valid before you tag.
 
 ## Auth
 
-The headless-friendly path: set your credentials and let `ttcli` mint and
-refresh the session itself.
+Credentials come from **1Password** (same pattern as `bmcctl`):
 
 ```bash
-export TICKTICK_EMAIL=you@example.com
-export TICKTICK_PASSWORD='…'
-ttcli login          # writes ~/.ticktick_auth.json
+brew install --cask 1password-cli
+op signin                    # or enable Touch ID unlock
+
+# ttcli searches all vaults for a Login item titled "TickTick"
+ttcli login                  # finds Employee/TickTick automatically
 ```
 
-With those env vars set, `ttcli` also **auto-refreshes** on a `401` — so a
-long-running box (e.g. `ru0`/`nas0`) keeps working without manual re-login.
+Override vault or item if needed:
+
+```bash
+ttcli login --vault Employee --item TickTick
+# or env (item location only — not the password):
+export TTCLI_OP_VAULT=Employee
+export TTCLI_OP_ITEM=TickTick
+```
+
+**Note:** if you have an older Homebrew `ttcli` on PATH, rebuild from source:
+`make install` then run `~/go/bin/ttcli login` (or `hash -r` so go/bin wins).
+
+With a valid session on disk, `ttcli` **auto-refreshes** on `401` by re-reading
+1Password — so a long-running box keeps working without manual re-login.
 
 A captured session is read from the first of:
 
@@ -70,5 +112,4 @@ name (case-insensitive), or `inbox`.
 
 Implemented: login/auto-refresh, `ls`, `tasks`, `add`, `done`, `rm`,
 `focus`, `raw`.
-Planned: goreleaser + Homebrew tap + AUR packaging, KOReader reading
-telemetry, and a coaching daemon for `ru0`/`nas0`.
+Planned: KOReader reading telemetry and a coaching daemon for `ru0`/`nas0`.

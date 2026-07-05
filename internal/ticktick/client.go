@@ -8,9 +8,10 @@
 //
 // Cookies are joined into a Cookie header, the _csrf_token cookie is echoed
 // back as x-csrftoken, and any extra headers are merged over browser-like
-// defaults. When TICKTICK_EMAIL / TICKTICK_PASSWORD are set the client can
-// mint a fresh session itself (ttcli login) and silently re-authenticate
-// when the API answers 401 — which is what makes it usable headless.
+// defaults. Credentials come from 1Password by default (see CredentialOptions);
+// when present the client can mint a fresh session (ttcli login) and silently
+// re-authenticate when the API answers 401 — which is what makes it usable
+// headless.
 package ticktick
 
 import (
@@ -59,23 +60,16 @@ type Credentials struct {
 // Valid reports whether both fields are present.
 func (c Credentials) Valid() bool { return c.Email != "" && c.Password != "" }
 
-// CredentialsFromEnv reads TICKTICK_EMAIL / TICKTICK_PASSWORD.
-func CredentialsFromEnv() Credentials {
-	return Credentials{
-		Email:    os.Getenv("TICKTICK_EMAIL"),
-		Password: os.Getenv("TICKTICK_PASSWORD"),
-	}
-}
-
 // Client talks to the TickTick private API with a captured session.
 type Client struct {
 	BaseURL  string
 	AuthPath string
 	SavedAt  string
 
-	creds   Credentials
-	http    *http.Client
-	headers map[string]string
+	creds    Credentials
+	credOpts CredentialOptions
+	http     *http.Client
+	headers  map[string]string
 }
 
 func defaultHeaders() map[string]string {
@@ -122,9 +116,9 @@ func DefaultAuthSavePath() string {
 }
 
 // New loads the session at authPath (or the resolved default if empty).
-// If no session file exists but env credentials are present, it logs in
-// and writes one.
-func New(authPath string) (*Client, error) {
+// If no session file exists but credentials can be resolved (1Password by
+// default), it logs in and writes one.
+func New(authPath string, credOpts CredentialOptions) (*Client, error) {
 	explicit := authPath != ""
 	if authPath == "" {
 		authPath = ResolveAuthPath()
@@ -132,11 +126,16 @@ func New(authPath string) (*Client, error) {
 	c := &Client{
 		BaseURL:  DefaultBaseURL,
 		AuthPath: authPath,
-		creds:    CredentialsFromEnv(),
+		credOpts: credOpts,
 		http:     &http.Client{Timeout: 30 * time.Second},
 		headers:  defaultHeaders(),
 	}
 	if err := c.loadAuthFile(authPath); err != nil {
+		creds, rerr := credOpts.Resolve()
+		if rerr != nil {
+			return nil, fmt.Errorf("%w\n  also: %v", err, rerr)
+		}
+		c.creds = creds
 		if c.creds.Valid() {
 			// No session on disk: mint one and persist it to the home
 			// path (not the cwd fallback) unless the caller was explicit.
@@ -147,14 +146,21 @@ func New(authPath string) (*Client, error) {
 		}
 		return nil, err
 	}
+	if creds, err := credOpts.Resolve(); err == nil && creds.Valid() {
+		c.creds = creds
+	}
 	return c, nil
 }
 
-// Login mints a fresh session with creds, writes it to authPath (or the
+// Login mints a fresh session with credOpts, writes it to authPath (or the
 // default save path if empty), and returns a ready client.
-func Login(creds Credentials, authPath string) (*Client, error) {
+func Login(credOpts CredentialOptions, authPath string) (*Client, error) {
+	creds, err := credOpts.Resolve()
+	if err != nil {
+		return nil, err
+	}
 	if !creds.Valid() {
-		return nil, fmt.Errorf("missing credentials: set TICKTICK_EMAIL and TICKTICK_PASSWORD (or pass --email/--password)")
+		return nil, fmt.Errorf("missing credentials: run `op signin`, then ensure a TickTick Login item exists in 1Password (or pass --vault/--item)")
 	}
 	if authPath == "" {
 		authPath = DefaultAuthSavePath()
@@ -162,6 +168,7 @@ func Login(creds Credentials, authPath string) (*Client, error) {
 	c := &Client{
 		BaseURL:  DefaultBaseURL,
 		AuthPath: authPath,
+		credOpts: credOpts,
 		creds:    creds,
 		http:     &http.Client{Timeout: 30 * time.Second},
 		headers:  defaultHeaders(),
@@ -175,7 +182,7 @@ func Login(creds Credentials, authPath string) (*Client, error) {
 func (c *Client) loadAuthFile(path string) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("read auth file %s: %w\n  run `ttcli login` (with TICKTICK_EMAIL/PASSWORD set) to create it", path, err)
+		return fmt.Errorf("read auth file %s: %w\n  run `ttcli login` to create it (reads credentials from 1Password)", path, err)
 	}
 	var a authFile
 	if err := json.Unmarshal(raw, &a); err != nil {
@@ -207,6 +214,13 @@ func (c *Client) applyAuth(a authFile) {
 
 // refresh performs a fresh signon and persists the resulting session.
 func (c *Client) refresh() error {
+	if !c.creds.Valid() {
+		creds, err := c.credOpts.Resolve()
+		if err != nil {
+			return err
+		}
+		c.creds = creds
+	}
 	cookies, err := doSignon(c.creds)
 	if err != nil {
 		return err
@@ -307,7 +321,7 @@ func (c *Client) do(method, path string, body []byte) ([]byte, error) {
 		}
 	}
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
-		return nil, fmt.Errorf("auth rejected (HTTP %d) — the session has expired; run `ttcli login` (or set TICKTICK_EMAIL/PASSWORD for auto-refresh)", status)
+		return nil, fmt.Errorf("auth rejected (HTTP %d) — the session has expired; run `ttcli login` (1Password credentials are used for auto-refresh)", status)
 	}
 	if status >= 300 {
 		return nil, fmt.Errorf("%s %s: HTTP %d: %s", method, path, status, truncate(string(rb), 300))
@@ -374,6 +388,37 @@ func (c *Client) ListProjects() ([]Project, error) {
 		return nil, err
 	}
 	return ps, nil
+}
+
+// AccountStatus is a quick health snapshot for `ttcli status`.
+type AccountStatus struct {
+	AuthPath     string
+	SessionSaved string
+}
+
+// Status returns session metadata (call Ping separately to verify API).
+func (c *Client) Status() *AccountStatus {
+	return &AccountStatus{AuthPath: c.AuthPath, SessionSaved: c.SavedAt}
+}
+
+// OpenProjects returns non-closed TASK lists (excludes NOTE lists unless
+// includeNotes is true).
+func OpenProjects(ps []Project, includeNotes bool) []Project {
+	out := ps[:0]
+	for _, p := range ps {
+		if p.Closed != nil && *p.Closed {
+			continue
+		}
+		kind := p.Kind
+		if kind == "" {
+			kind = "TASK"
+		}
+		if !includeNotes && kind == "NOTE" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // InboxID resolves the user's Inbox project id from the sync endpoint.

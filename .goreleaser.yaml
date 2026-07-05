@@ -31,9 +31,9 @@ builds:
       - CGO_ENABLED=0
     ldflags:
       - -s -w
-      - -X main.version={{ .Version }}
-      - -X main.commit={{ .Commit }}
-      - -X main.date={{ .Date }}
+      - -X github.com/j4y-w4lk3r/ttcli/internal/version.Version={{ .Version }}
+      - -X github.com/j4y-w4lk3r/ttcli/internal/version.Commit={{ .Commit }}
+      - -X github.com/j4y-w4lk3r/ttcli/internal/version.Date={{ .Date }}
     goos:
       - darwin
       - linux

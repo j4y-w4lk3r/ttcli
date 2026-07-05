@@ -16,99 +16,41 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/j4y-w4lk3r/ttcli/internal/secrets"
 	"github.com/j4y-w4lk3r/ttcli/internal/ticktick"
+	"github.com/j4y-w4lk3r/ttcli/internal/version"
 	"github.com/j4y-w4lk3r/ttcli/internal/webhook"
-)
-
-// Build metadata, overridden at release time via goreleaser ldflags
-// (-X main.version / main.commit / main.date).
-var (
-	version = "dev"
-	commit  = "none"
-	date    = "unknown"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		usage()
+		fmt.Fprintln(os.Stderr, "usage: ttcli <command>  (try: ttcli help  or  ttcli shell)")
 		os.Exit(2)
 	}
-	args := os.Args[2:]
-
-	var err error
-	switch os.Args[1] {
-	case "version", "--version", "-v":
-		fmt.Printf("ttcli %s (commit %s, built %s)\n", version, commit, date)
-		return
-	case "help", "-h", "--help":
-		usage()
-		return
-	case "login":
-		err = cmdLogin(args)
-	case "ls", "lists", "projects":
-		err = cmdLists(args)
-	case "tasks":
-		err = cmdTasks(args)
-	case "add":
-		err = cmdAdd(args)
-	case "done":
-		err = cmdDone(args)
-	case "rm", "delete":
-		err = cmdRm(args)
-	case "focus":
-		err = cmdFocus(args)
-	case "pomo":
-		err = cmdPomo(args)
-	case "serve", "webhook":
-		err = cmdServe(args)
-	case "raw":
-		err = cmdRaw(args)
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", os.Args[1])
-		usage()
-		os.Exit(2)
-	}
-	if err != nil {
+	if err := runCommand(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "ttcli: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func usage() {
-	fmt.Fprint(os.Stderr, `ttcli — TickTick from the terminal
-
-usage:
-  ttcli login                       mint/refresh a session (TICKTICK_EMAIL/PASSWORD)
-  ttcli ls                          list projects/lists
-  ttcli tasks <project>             live tasks in a project (id or name)
-  ttcli add <title> [-p PROJECT] [-P none|low|medium|high] [-n NOTE]
-  ttcli done <project> <task-id>    mark a task complete
-  ttcli rm <project> <task-id>      delete a task
-  ttcli focus [YYYY-MM-DD]          pomodoro/focus summary for a day (default today)
-  ttcli focus --short               print N/GOAL only (for tmux status; goal=$TTCLI_POMO_GOAL or 30)
-  ttcli pomo                        alias for: ttcli focus --short
-  ttcli serve [-addr HOST:PORT]     local webhook (POST /hooks/pomo → refresh tmux)
-  ttcli raw <api-path>              GET an arbitrary /api/... path (debug)
-  ttcli version
-
-auth:
-  session is read from $TICKTICK_AUTH_FILE, else ~/.ticktick_auth.json,
-  else ./ticktick_auth.json. With TICKTICK_EMAIL/PASSWORD set, ttcli mints
-  and auto-refreshes the session itself (on 401).
-`)
+func client() (*ticktick.Client, error) {
+	return ticktick.New("", ticktick.CredentialOptions{})
 }
-
-func client() (*ticktick.Client, error) { return ticktick.New("") }
 
 func cmdLogin(args []string) error {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
-	email := fs.String("email", os.Getenv("TICKTICK_EMAIL"), "TickTick email (or $TICKTICK_EMAIL)")
-	pass := fs.String("password", os.Getenv("TICKTICK_PASSWORD"), "TickTick password (or $TICKTICK_PASSWORD)")
+	vault := fs.String("vault", "", "1Password vault (default Private, or $TTCLI_OP_VAULT)")
+	item := fs.String("item", "", "1Password Login item title or id (default TickTick, or $TTCLI_OP_ITEM)")
+	email := fs.String("email", "", "TickTick email (skip 1Password; requires --password)")
+	pass := fs.String("password", "", "TickTick password (skip 1Password; requires --email)")
 	out := fs.String("out", "", "path to write the session file (default ~/.ticktick_auth.json)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	c, err := ticktick.Login(ticktick.Credentials{Email: *email, Password: *pass}, *out)
+	opts := ticktick.CredentialOptions{
+		Vault: *vault, Item: *item, Email: *email, Password: *pass,
+	}
+	c, err := ticktick.Login(opts, *out)
 	if err != nil {
 		return err
 	}
@@ -116,7 +58,14 @@ func cmdLogin(args []string) error {
 	return nil
 }
 
-func cmdLists(_ []string) error {
+func cmdLists(args []string) error {
+	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
+	namesOnly := fs.Bool("names", false, "print list names only (one per line)")
+	tree := fs.Bool("tree", false, "print folder tree (TickTick project groups)")
+	all := fs.Bool("all", false, "include closed and NOTE lists")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 	c, err := client()
 	if err != nil {
 		return err
@@ -124,6 +73,23 @@ func cmdLists(_ []string) error {
 	ps, err := c.ListProjects()
 	if err != nil {
 		return err
+	}
+	if !*all {
+		ps = ticktick.OpenProjects(ps, false)
+	}
+	if *tree {
+		gs, err := c.ListProjectGroups()
+		if err != nil {
+			return err
+		}
+		fmt.Print(ticktick.FormatProjectTree(ticktick.ProjectTree(gs, ps)))
+		return nil
+	}
+	if *namesOnly {
+		for _, p := range ps {
+			fmt.Println(p.Name)
+		}
+		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(w, "ID\tNAME\tKIND")
@@ -137,15 +103,84 @@ func cmdLists(_ []string) error {
 	return w.Flush()
 }
 
-func cmdTasks(args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("usage: ttcli tasks <project-id|project-name>")
+func cmdStatus(args []string) error {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	ping := fs.Bool("ping", false, "also verify API connectivity")
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
 	c, err := client()
 	if err != nil {
 		return err
 	}
-	pid, err := c.ResolveProject(args[0])
+	st := c.Status()
+	fmt.Println(version.String())
+	fmt.Printf("session  %s", st.AuthPath)
+	if st.SessionSaved != "" {
+		fmt.Printf("  (saved %s)", st.SessionSaved)
+	}
+	fmt.Println()
+
+	switch {
+	case *ping:
+		if err := c.Ping(); err != nil {
+			fmt.Printf("api      ✗ %v\n", err)
+		} else {
+			fmt.Println("api      ✓ connected")
+		}
+	default:
+		fmt.Println("api      (run with --ping to verify)")
+	}
+
+	if b := secrets.Default(); b.Available() == nil {
+		switch b.CheckSignedIn() {
+		case nil:
+			fmt.Println("1pass    ✓ signed in (auto-refresh ok)")
+		default:
+			fmt.Println("1pass    · available (run `op signin` for auto-refresh)")
+		}
+	} else {
+		fmt.Println("1pass    · not installed")
+	}
+	return nil
+}
+
+func cmdTasks(args []string) error {
+	fs := flag.NewFlagSet("tasks", flag.ContinueOnError)
+	completed := fs.Bool("completed", false, "show completed tasks (account-wide)")
+	done := fs.Bool("done", false, "alias for --completed")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if *completed || *done {
+		c, err := client()
+		if err != nil {
+			return err
+		}
+		tasks, err := c.CompletedTasks()
+		if err != nil {
+			return err
+		}
+		printTasks(tasks)
+		return nil
+	}
+	if len(rest) < 1 {
+		return fmt.Errorf("usage: ttcli tasks <project-id|project-name|all> [--completed]")
+	}
+	c, err := client()
+	if err != nil {
+		return err
+	}
+	if strings.EqualFold(rest[0], "all") {
+		tasks, err := c.AllOpenTasks()
+		if err != nil {
+			return err
+		}
+		printTasks(tasks)
+		return nil
+	}
+	pid, err := c.ResolveProject(rest[0])
 	if err != nil {
 		return err
 	}
@@ -153,6 +188,11 @@ func cmdTasks(args []string) error {
 	if err != nil {
 		return err
 	}
+	printTasks(tasks)
+	return nil
+}
+
+func printTasks(tasks []ticktick.Task) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(w, "STATUS\tPRIO\tDUE\tID\tTITLE")
 	for _, t := range tasks {
@@ -161,7 +201,9 @@ func cmdTasks(args []string) error {
 			status = "done"
 		}
 		due := t.DueDate
-		if len(due) >= 10 {
+		if len(due) >= 16 {
+			due = due[11:16] + " " + due[:10]
+		} else if len(due) >= 10 {
 			due = due[:10]
 		}
 		if due == "" {
@@ -169,7 +211,85 @@ func cmdTasks(args []string) error {
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", status, t.PriorityLabel(), due, t.ID, t.Title)
 	}
-	return w.Flush()
+	w.Flush()
+}
+
+func cmdDue(args []string) error {
+	date, at, project, query := "", "10:00", "", ""
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		next := func() string {
+			if i+1 < len(args) {
+				i++
+				return args[i]
+			}
+			return ""
+		}
+		switch a {
+		case "-d", "--date":
+			date = next()
+		case "-t", "--time":
+			at = next()
+		case "-p", "--project":
+			project = next()
+		default:
+			if query == "" {
+				query = a
+			} else {
+				query += " " + a
+			}
+		}
+	}
+	if date == "" || query == "" {
+		return fmt.Errorf("usage: ttcli due <task-id|title> -d YYYY-MM-DD [-t HH:MM] [-p PROJECT]")
+	}
+	d, err := time.Parse("2006-01-02", date)
+	if err != nil {
+		return fmt.Errorf("invalid date %q: %w", date, err)
+	}
+	parts := strings.Split(at, ":")
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid time %q (use HH:MM)", at)
+	}
+	hh, err1 := strconv.Atoi(parts[0])
+	mm, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil || hh < 0 || hh > 23 || mm < 0 || mm > 59 {
+		return fmt.Errorf("invalid time %q (use HH:MM)", at)
+	}
+	d = d.Add(time.Duration(hh)*time.Hour + time.Duration(mm)*time.Minute)
+
+	c, err := client()
+	if err != nil {
+		return err
+	}
+	var task map[string]any
+	if looksLikeTaskID(query) {
+		task, err = c.FindTaskByID(query)
+	} else {
+		task, err = c.FindTask(query)
+	}
+	if err != nil {
+		return err
+	}
+	if project != "" {
+		pid, err := c.ResolveProject(project)
+		if err != nil {
+			return err
+		}
+		if got, _ := task["projectId"].(string); got != pid {
+			return fmt.Errorf("task %q is not in project %q", query, project)
+		}
+	}
+	if err := c.RescheduleTask(task, d); err != nil {
+		return err
+	}
+	title, _ := task["title"].(string)
+	fmt.Printf("✓ rescheduled %q → %s %s\n", title, d.Format("2006-01-02"), d.Format("15:04"))
+	return nil
+}
+
+func looksLikeTaskID(s string) bool {
+	return len(s) >= 20 && !strings.Contains(s, " ")
 }
 
 func cmdAdd(args []string) error {

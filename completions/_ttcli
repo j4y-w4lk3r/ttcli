@@ -1,0 +1,72 @@
+#compdef ttcli
+
+# Zsh completion for ttcli. Install:
+#   make install-completions
+# or manually:
+#   cp completions/_ttcli ~/.config/zsh/completions/_ttcli
+
+_ttcli() {
+  local -a commands subcmd
+  commands=(
+    'login:1Password session'
+    'status:version and auth health'
+    'ls:list projects'
+    'tree:folder tree'
+    'folder:manage folders'
+    'project:manage lists'
+    'tasks:list tasks'
+    'add:create task'
+    'edit:edit task'
+    'due:reschedule task'
+    'done:complete task'
+    'rm:delete task'
+    'focus:pomodoro summary'
+    'pomo:short pomodoro line'
+    'shell:interactive REPL'
+    'help:help [cmd|gum|bt]'
+    'raw:debug API'
+    'version:print version'
+  )
+
+  if (( CURRENT == 2 )); then
+    _describe 'command' commands
+    return
+  fi
+
+  case "$words[2]" in
+    help)
+      subcmd=(gum gum-menu bt bubbletea-tui)
+      local -a topics
+      topics=(gum bt login status ls tree folder project tasks add edit due done rm focus pomo shell raw version)
+      if (( CURRENT == 3 )); then
+        _describe 'help topic' topics
+      fi
+      ;;
+    folder)
+      subcmd=(ls add rename rm)
+      if (( CURRENT == 3 )); then
+        _describe 'folder command' subcmd
+      fi
+      ;;
+    project|list)
+      subcmd=(add rename move rm)
+      if (( CURRENT == 3 )); then
+        _describe 'project command' subcmd
+      fi
+      ;;
+    tasks)
+      _arguments '1:project:(all)' '--completed[show completed tasks]'
+      ;;
+    ls|lists|projects)
+      _arguments '--tree[folder tree]' '--names[names only]' '--all[include closed]'
+      ;;
+    status)
+      _arguments '--ping[verify API]'
+      ;;
+    focus)
+      _arguments '--short[tmux line only]'
+      ;;
+  esac
+}
+
+compdef _ttcli ttcli
