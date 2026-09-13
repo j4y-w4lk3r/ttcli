@@ -224,7 +224,9 @@ func TestTaskDetailPanel(t *testing.T) {
 }
 
 func TestPomoTimelineGridCursorFollowsNow(t *testing.T) {
-	now := time.Date(2026, 9, 7, 9, 11, 0, 0, time.Local)
+	loc := time.Local
+	now := time.Now().In(loc)
+	now = time.Date(now.Year(), now.Month(), now.Day(), 9, 11, 0, 0, loc)
 	grid := buildPomoHourGrid(nil, nil, now, nil, true)
 	nowIdx := gridRowForNow(grid)
 	if nowIdx < 0 {
