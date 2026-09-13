@@ -31,7 +31,8 @@ func cmdFolder(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Print(ticktick.FormatProjectTree(ticktick.ProjectTree(gs, ps)))
+		inboxID, _ := c.InboxID()
+		fmt.Print(ticktick.FormatProjectTree(ticktick.ProjectTreeWithInbox(inboxID, gs, ps)))
 		return nil
 	case "add", "mkdir", "create":
 		if len(rest) < 1 {

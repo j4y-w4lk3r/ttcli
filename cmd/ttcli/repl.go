@@ -84,6 +84,8 @@ func runCommand(args []string) error {
 		return cmdFocus(args[1:])
 	case "pomo":
 		return cmdPomo(args[1:])
+	case "tui", "ui":
+		return cmdTui(args[1:])
 	case "shell", "repl":
 		if isNestedShell() {
 			fmt.Println("(already in shell)")
@@ -94,6 +96,8 @@ func runCommand(args []string) error {
 		return cmdServe(args[1:])
 	case "raw":
 		return cmdRaw(args[1:])
+	case "debug":
+		return cmdDebug(args[1:])
 	case "version", "-v", "--version", "-version":
 		fmt.Println(version.String())
 		return nil

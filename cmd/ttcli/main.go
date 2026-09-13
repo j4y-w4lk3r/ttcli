@@ -82,7 +82,8 @@ func cmdLists(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Print(ticktick.FormatProjectTree(ticktick.ProjectTree(gs, ps)))
+		inboxID, _ := c.InboxID()
+		fmt.Print(ticktick.FormatProjectTree(ticktick.ProjectTreeWithInbox(inboxID, gs, ps)))
 		return nil
 	}
 	if *namesOnly {
@@ -362,47 +363,6 @@ func cmdRm(args []string) error {
 	}
 	fmt.Printf("✓ deleted %s\n", args[1])
 	return nil
-}
-
-func cmdFocus(args []string) error {
-	fs := flag.NewFlagSet("focus", flag.ExitOnError)
-	short := fs.Bool("short", false, "print N/GOAL only (for scripts/tmux)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	day, err := parseFocusDay(fs.Args())
-	if err != nil {
-		return err
-	}
-	c, err := client()
-	if err != nil {
-		return err
-	}
-	s, err := c.FocusForDay(day)
-	if err != nil {
-		return err
-	}
-	writePomoCache(s.PomoCount)
-	runPomoPush(s.PomoCount)
-	if *short {
-		fmt.Println(formatPomoStatus(s.PomoCount))
-		return nil
-	}
-	mins := s.TotalSeconds / 60
-	fmt.Printf("%s — %d pomodoro(s), %dh%02dm focused\n", s.Date, s.PomoCount, mins/60, mins%60)
-	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	for _, r := range s.Records {
-		title := "(untitled)"
-		if len(r.Tasks) > 0 && r.Tasks[0].Title != "" {
-			title = r.Tasks[0].Title
-		}
-		start := r.StartTime
-		if len(start) >= 16 {
-			start = start[11:16]
-		}
-		fmt.Fprintf(w, "  %s\t%s\n", start, title)
-	}
-	return w.Flush()
 }
 
 func cmdPomo(args []string) error {

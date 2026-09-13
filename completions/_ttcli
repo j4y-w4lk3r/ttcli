@@ -20,8 +20,9 @@ _ttcli() {
     'due:reschedule task'
     'done:complete task'
     'rm:delete task'
-    'focus:pomodoro summary'
+    'focus:pomodoro summary and live timer'
     'pomo:short pomodoro line'
+    'tui:interactive browser (tasks/calendar/pomo/habits)'
     'shell:interactive REPL'
     'help:help [cmd|gum|bt]'
     'raw:debug API'
@@ -37,7 +38,7 @@ _ttcli() {
     help)
       subcmd=(gum gum-menu bt bubbletea-tui)
       local -a topics
-      topics=(gum bt login status ls tree folder project tasks add edit due done rm focus pomo shell raw version)
+      topics=(gum bt tui login status ls tree folder project tasks add edit due done rm focus pomo shell raw version)
       if (( CURRENT == 3 )); then
         _describe 'help topic' topics
       fi
@@ -64,7 +65,21 @@ _ttcli() {
       _arguments '--ping[verify API]'
       ;;
     focus)
-      _arguments '--short[tmux line only]'
+      if (( CURRENT == 3 )); then
+        subcmd=(start stop pause resume status)
+        _describe 'focus command' subcmd
+      elif (( CURRENT > 3 )) && [[ "$words[3]" == start ]]; then
+        _arguments \
+          '--duration[minutes]:minutes:' \
+          '--task[task id or title]:task:' \
+          '--project[list]:project:' \
+          '--title[create task and focus]:title:' \
+          '--no-sync[skip TickTick log on stop]'
+      elif (( CURRENT > 3 )) && [[ "$words[3]" == stop ]]; then
+        _arguments '--no-sync[skip TickTick log]'
+      else
+        _arguments '--short[one-line status or tmux summary]'
+      fi
       ;;
   esac
 }

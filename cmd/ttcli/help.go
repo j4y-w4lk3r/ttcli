@@ -75,7 +75,9 @@ func printHelp(w io.Writer) {
 		{
 			head: "focus & misc",
 			lines: []string{
+				"ttcli tui                tasks · calendar · pomo · habits",
 				"ttcli focus [DATE]       pomodoro summary",
+				"ttcli focus start|stop|repeat   live timer + TickTick log",
 				"ttcli pomo               short focus line (tmux)",
 				"ttcli help gum|bt        interactive help menus",
 				"ttcli shell              interactive REPL",
@@ -100,6 +102,6 @@ func printHelp(w io.Writer) {
 		fmt.Fprintln(w)
 	}
 
-	fmt.Fprintf(w, "%s\n", paint(w, c, ansiDim, "tips:  ttcli help tasks | ttcli help gum | ttcli help bt | ttcli shell"))
+	fmt.Fprintf(w, "%s\n", paint(w, c, ansiDim, "tips:  ttcli tui | ttcli help tasks | ttcli help gum | ttcli shell"))
 	fmt.Fprintln(w)
 }

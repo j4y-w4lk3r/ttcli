@@ -3,7 +3,7 @@ package ticktick
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -23,6 +23,36 @@ func (c *Client) CompletedTasks() ([]Task, error) {
 	return tasks, nil
 }
 
+// TasksCompletedOn returns tasks completed on the given local calendar day.
+func (c *Client) TasksCompletedOn(day time.Time) ([]Task, error) {
+	if day.IsZero() {
+		day = time.Now()
+	}
+	tasks, err := c.CompletedTasks()
+	if err != nil {
+		return nil, err
+	}
+	y, m, d := day.Date()
+	out := tasks[:0]
+	for _, t := range tasks {
+		if t.CompletedT == "" {
+			continue
+		}
+		ct, err := time.Parse(ticktickTimeLayout, t.CompletedT)
+		if err != nil {
+			continue
+		}
+		cy, cm, cd := ct.Date()
+		if cy == y && cm == m && cd == d {
+			out = append(out, t)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CompletedT < out[j].CompletedT
+	})
+	return out, nil
+}
+
 // AllOpenTasks returns active tasks across all lists.
 func (c *Client) AllOpenTasks() ([]Task, error) {
 	raw, err := c.GetRaw("/api/v2/project/all/tasks")
@@ -32,7 +62,7 @@ func (c *Client) AllOpenTasks() ([]Task, error) {
 	tasks := parseTasks(raw)
 	out := tasks[:0]
 	for _, t := range tasks {
-		if t.Deleted == 0 && !t.Done() {
+		if t.Deleted.Int() == 0 && !t.Done() {
 			out = append(out, t)
 		}
 	}
@@ -78,22 +108,47 @@ func (c *Client) FindTask(title string) (map[string]any, error) {
 	return matches[0], nil
 }
 
-// FindTaskByID loads a task by id from the account-wide task list.
+// FindTaskByID loads a task by id from open, completed, or project task lists.
 func (c *Client) FindTaskByID(id string) (map[string]any, error) {
-	raw, err := c.GetRaw("/api/v2/project/all/tasks")
-	if err != nil {
-		return nil, err
+	return c.findTaskRawByID(id, "")
+}
+
+// findTaskRawByID locates raw task JSON by id. Completed tasks live outside
+// /api/v2/project/all/tasks, so projectRef is checked first when provided.
+func (c *Client) findTaskRawByID(id, projectRef string) (map[string]any, error) {
+	var endpoints []string
+	if projectRef != "" {
+		if pid, err := c.ResolveProject(projectRef); err == nil {
+			endpoints = append(endpoints, "/api/v2/project/"+pid+"/tasks")
+		}
 	}
-	tasks, err := parseTasksRaw(raw)
-	if err != nil {
-		return nil, err
-	}
-	for _, t := range tasks {
-		if got, _ := t["id"].(string); got == id {
-			return t, nil
+	endpoints = append(endpoints,
+		"/api/v2/project/all/tasks",
+		"/api/v2/project/all/closed",
+	)
+	for _, ep := range endpoints {
+		raw, err := c.GetRaw(ep)
+		if err != nil {
+			continue
+		}
+		tasks, err := parseTasksRaw(raw)
+		if err != nil {
+			continue
+		}
+		if task, ok := findTaskInRawList(tasks, id); ok {
+			return task, nil
 		}
 	}
 	return nil, fmt.Errorf("no task with id %q", id)
+}
+
+func findTaskInRawList(tasks []map[string]any, id string) (map[string]any, bool) {
+	for _, t := range tasks {
+		if got, _ := t["id"].(string); got == id {
+			return t, true
+		}
+	}
+	return nil, false
 }
 
 func parseTasksRaw(raw []byte) ([]map[string]any, error) {
@@ -108,45 +163,4 @@ func parseTasksRaw(raw []byte) ([]map[string]any, error) {
 		return nil, err
 	}
 	return obj.Tasks, nil
-}
-
-// RescheduleTask sets due/start date and reminder to fire at due time.
-func (c *Client) RescheduleTask(task map[string]any, due time.Time) error {
-	id, _ := task["id"].(string)
-	if id == "" {
-		return fmt.Errorf("task has no id")
-	}
-	tz, _ := task["timeZone"].(string)
-	if tz == "" {
-		tz = localTZ()
-	}
-	loc, err := time.LoadLocation(tz)
-	if err != nil {
-		loc = time.UTC
-	}
-	due = time.Date(due.Year(), due.Month(), due.Day(), due.Hour(), due.Minute(), 0, 0, loc)
-	formatted := due.Format(ticktickTimeLayout)
-
-	task["startDate"] = formatted
-	task["dueDate"] = formatted
-	task["isAllDay"] = false
-	task["isFloating"] = false
-	task["timeZone"] = tz
-	task["reminder"] = "TRIGGER:PT0S"
-	if rems, ok := task["reminders"].([]any); ok && len(rems) > 0 {
-		if m, ok := rems[0].(map[string]any); ok {
-			m["trigger"] = "TRIGGER:PT0S"
-		}
-	} else {
-		task["reminders"] = []any{map[string]any{"trigger": "TRIGGER:PT0S"}}
-	}
-	task["modifiedTime"] = time.Now().In(loc).Format(ticktickTimeLayout)
-
-	payload := map[string]any{
-		"add": []any{}, "update": []any{task}, "delete": []any{},
-		"addAttachments": []any{}, "updateAttachments": []any{}, "deleteAttachments": []any{},
-	}
-	b, _ := json.Marshal(payload)
-	_, err = c.do(http.MethodPost, "/api/v2/batch/task", b)
-	return err
 }

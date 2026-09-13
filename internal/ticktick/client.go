@@ -20,8 +20,10 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -29,6 +31,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -307,7 +310,7 @@ func saveAuth(path string, a authFile) error {
 // ---- request helpers (with one-shot 401 auto-refresh) ----
 
 func (c *Client) do(method, path string, body []byte) ([]byte, error) {
-	rb, status, err := c.do1(method, path, body)
+	rb, status, err := c.doWithRetry(method, path, body)
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +318,7 @@ func (c *Client) do(method, path string, body []byte) ([]byte, error) {
 		if rerr := c.refresh(); rerr != nil {
 			return nil, fmt.Errorf("session expired and re-login failed: %w", rerr)
 		}
-		rb, status, err = c.do1(method, path, body)
+		rb, status, err = c.doWithRetry(method, path, body)
 		if err != nil {
 			return nil, err
 		}
@@ -327,6 +330,54 @@ func (c *Client) do(method, path string, body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("%s %s: HTTP %d: %s", method, path, status, truncate(string(rb), 300))
 	}
 	return rb, nil
+}
+
+func (c *Client) doWithRetry(method, path string, body []byte) ([]byte, int, error) {
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 400 * time.Millisecond)
+		}
+		rb, status, err := c.do1(method, path, body)
+		if err == nil {
+			return rb, status, nil
+		}
+		lastErr = err
+		if !isRetryableNetErr(err) || attempt+1 >= maxAttempts {
+			return nil, 0, err
+		}
+	}
+	return nil, 0, lastErr
+}
+
+func isRetryableNetErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "broken pipe") {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		if sys, ok := opErr.Err.(*syscall.Errno); ok {
+			switch *sys {
+			case syscall.ECONNRESET, syscall.ECONNREFUSED, syscall.EPIPE:
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (c *Client) do1(method, path string, body []byte) ([]byte, int, error) {
@@ -441,7 +492,7 @@ func (c *Client) ResolveProject(q string) (string, error) {
 	if q == "" || strings.EqualFold(q, "inbox") {
 		return c.InboxID()
 	}
-	if strings.HasPrefix(q, "inbox") || looksLikeID(q) {
+	if strings.HasPrefix(q, "inbox") || LooksLikeID(q) {
 		return q, nil
 	}
 	ps, err := c.ListProjects()
@@ -456,20 +507,13 @@ func (c *Client) ResolveProject(q string) (string, error) {
 	return "", fmt.Errorf("no project named %q (try `ttcli ls`)", q)
 }
 
-// ProjectTasks returns the live (non-deleted) tasks in a project.
+// ProjectTasks returns all tasks in a project, including trashed ones (deleted != 0).
 func (c *Client) ProjectTasks(projectID string) ([]Task, error) {
 	raw, err := c.GetRaw("/api/v2/project/" + projectID + "/tasks")
 	if err != nil {
 		return nil, err
 	}
-	tasks := parseTasks(raw)
-	live := tasks[:0]
-	for _, t := range tasks {
-		if t.Deleted == 0 {
-			live = append(live, t)
-		}
-	}
-	return live, nil
+	return parseTasks(raw), nil
 }
 
 func parseTasks(raw []byte) []Task {
@@ -578,48 +622,70 @@ func (c *Client) CompleteTask(projectID, taskID string) error {
 	if err != nil {
 		return err
 	}
-	raw, err := c.GetRaw("/api/v2/project/" + pid + "/tasks")
+	target, err := c.findProjectTask(pid, taskID)
 	if err != nil {
 		return err
 	}
+	target["status"] = 2
+	target["completedTime"] = time.Now().UTC().Format(ticktickTimeLayout)
+	return c.patchTask(pid, target)
+}
+
+// ReopenTask marks a completed task as open again.
+func (c *Client) ReopenTask(projectID, taskID string) error {
+	pid, err := c.ResolveProject(projectID)
+	if err != nil {
+		return err
+	}
+	target, err := c.findProjectTask(pid, taskID)
+	if err != nil {
+		return err
+	}
+	target["status"] = 0
+	target["completedTime"] = ""
+	return c.patchTask(pid, target)
+}
+
+func (c *Client) findProjectTask(projectID, taskID string) (map[string]any, error) {
+	raw, err := c.GetRaw("/api/v2/project/" + projectID + "/tasks")
+	if err != nil {
+		return nil, err
+	}
 	var arr []map[string]any
 	if err := json.Unmarshal(raw, &arr); err != nil {
-		// object-shaped response
 		var obj struct {
 			Tasks []map[string]any `json:"tasks"`
 		}
 		if err2 := json.Unmarshal(raw, &obj); err2 != nil {
-			return fmt.Errorf("decode tasks: %w", err)
+			return nil, fmt.Errorf("decode tasks: %w", err)
 		}
 		arr = obj.Tasks
 	}
-	var target map[string]any
 	for _, t := range arr {
 		if id, _ := t["id"].(string); id == taskID {
-			target = t
-			break
+			return t, nil
 		}
 	}
-	if target == nil {
-		return fmt.Errorf("task %s not found in project %s", taskID, pid)
-	}
-	target["status"] = 2
-	target["completedTime"] = time.Now().UTC().Format(ticktickTimeLayout)
+	return nil, fmt.Errorf("task %s not found in project %s", taskID, projectID)
+}
+
+func (c *Client) patchTask(projectID string, target map[string]any) error {
 	payload := map[string]any{
 		"add": []any{}, "update": []any{target}, "delete": []any{},
 		"addAttachments": []any{}, "updateAttachments": []any{}, "deleteAttachments": []any{},
 	}
 	b, _ := json.Marshal(payload)
-	_, err = c.do(http.MethodPost, "/api/v2/batch/task", b)
+	_, err := c.do(http.MethodPost, "/api/v2/batch/task", b)
 	return err
 }
 
-// FocusStats summarises pomodoro/focus records for a UTC day.
+// FocusStats summarises pomodoro/focus records for a local calendar day.
 type FocusStats struct {
-	Date         string
-	PomoCount    int
-	TotalSeconds int64
-	Records      []FocusRecord
+	Date          string
+	PomoCount     int // all logged focus records today
+	FullPomoCount int // standard-length sessions (excludes unclaimed / short slices)
+	TotalSeconds  int64
+	Records       []FocusRecord
 }
 
 // FocusRecord is one pomodoro/focus session.
@@ -638,23 +704,102 @@ type FocusRecord struct {
 	} `json:"tasks"`
 }
 
-// FocusForDay fetches pomodoro records for the given day (UTC). A zero day
-// means today.
-func (c *Client) FocusForDay(day time.Time) (*FocusStats, error) {
-	if day.IsZero() {
-		day = time.Now().UTC()
+func (r *FocusRecord) TaskTitle() string {
+	return r.taskTitle()
+}
+
+func (r *FocusRecord) SetTaskTitle(title string) {
+	r.setTaskTitle(title)
+}
+
+func (r *FocusRecord) taskTitle() string {
+	if len(r.Tasks) > 0 && r.Tasks[0].Title != "" {
+		return r.Tasks[0].Title
 	}
-	day = day.UTC()
-	start := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.UTC)
-	end := time.Date(day.Year(), day.Month(), day.Day(), 23, 59, 59, 999000000, time.UTC)
+	return ""
+}
+
+// TaskID returns the linked TickTick task id when present.
+func (r *FocusRecord) TaskID() string {
+	if len(r.Tasks) > 0 {
+		return r.Tasks[0].TaskID
+	}
+	return ""
+}
+
+func (r *FocusRecord) setTaskTitle(title string) {
+	if len(r.Tasks) == 0 {
+		r.Tasks = append(r.Tasks, struct {
+			TaskID      string `json:"taskId"`
+			Title       string `json:"title"`
+			ProjectName string `json:"projectName"`
+			StartTime   string `json:"startTime"`
+			EndTime     string `json:"endTime"`
+		}{Title: title, StartTime: r.StartTime, EndTime: r.EndTime})
+		return
+	}
+	r.Tasks[0].Title = title
+}
+
+// DeletePomodoro removes a logged pomodoro/focus record by id.
+func (c *Client) DeletePomodoro(id string) error {
+	if id == "" {
+		return fmt.Errorf("pomodoro id required")
+	}
+	// POST /api/v2/batch/pomodoro {"delete":[id]} returns 200 but does not remove
+	// the record; the web client uses DELETE /api/v2/pomodoro/{id}.
+	_, err := c.do(http.MethodDelete, "/api/v2/pomodoro/"+id, nil)
+	return err
+}
+
+// UpdatePomodoro saves changes to an existing pomodoro record.
+func (c *Client) UpdatePomodoro(record FocusRecord) error {
+	if record.ID == "" {
+		return fmt.Errorf("pomodoro id required")
+	}
+	payload := map[string]any{"update": []any{record}}
+	b, _ := json.Marshal(payload)
+	_, err := c.do(http.MethodPost, "/api/v2/batch/pomodoro", b)
+	return err
+}
+
+// UpdatePomodoroTitle changes the linked task title on a focus record.
+func (c *Client) UpdatePomodoroTitle(record FocusRecord, newTitle string) error {
+	record.SetTaskTitle(newTitle)
+	return c.UpdatePomodoro(record)
+}
+
+// FocusForRange fetches pomodoro records between start and end (UTC, inclusive).
+func (c *Client) FocusForRange(start, end time.Time) ([]FocusRecord, error) {
+	start = start.UTC()
+	end = end.UTC()
 	path := fmt.Sprintf("/api/v2/pomodoros?from=%d&to=%d", start.UnixMilli(), end.UnixMilli())
 	var recs []FocusRecord
 	if err := c.getJSON(path, &recs); err != nil {
 		return nil, err
 	}
-	stats := &FocusStats{Date: start.Format("2006-01-02"), Records: recs}
+	sort.Slice(recs, func(i, j int) bool {
+		return recs[i].StartTime < recs[j].StartTime
+	})
+	return recs, nil
+}
+
+// FocusForDay fetches pomodoro records for the given local calendar day.
+// A zero day means today.
+func (c *Client) FocusForDay(day time.Time) (*FocusStats, error) {
+	day = localDateOnly(day)
+	start, end := LocalDayBounds(day)
+	recs, err := c.FocusForRange(start, end)
+	if err != nil {
+		return nil, err
+	}
+	recs = FocusRecordsOnDay(recs, day)
+	stats := &FocusStats{Date: day.Format("2006-01-02"), Records: recs}
 	for _, r := range recs {
 		stats.PomoCount++
+		if IsFullPomoRecord(r) {
+			stats.FullPomoCount++
+		}
 		st, e1 := time.Parse(ticktickTimeLayout, r.StartTime)
 		et, e2 := time.Parse(ticktickTimeLayout, r.EndTime)
 		if e1 == nil && e2 == nil && et.After(st) {
@@ -682,6 +827,11 @@ func localTZ() string {
 	return "Europe/Warsaw"
 }
 
+// LooksLikeID reports whether s looks like a TickTick object id.
+func LooksLikeID(s string) bool {
+	return looksLikeID(s)
+}
+
 func looksLikeID(s string) bool {
 	if len(s) < 16 {
 		return false
@@ -693,4 +843,9 @@ func looksLikeID(s string) bool {
 		}
 	}
 	return true
+}
+
+// ParseAPITime parses TickTick private API date-time strings.
+func ParseAPITime(s string) (time.Time, error) {
+	return time.Parse(ticktickTimeLayout, s)
 }

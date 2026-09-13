@@ -15,7 +15,7 @@ func cmdHelp(args []string) error {
 	switch strings.ToLower(args[0]) {
 	case "gum":
 		return cmdHelpGum()
-	case "bt", "browse", "tui":
+	case "bt", "browse":
 		return cmdHelpBrowse()
 	default:
 		c, ok := lookupCommand(args[0])

@@ -95,12 +95,15 @@ Cookies are sent as a `Cookie` header; `_csrf_token` is echoed back as
 
 ```bash
 ttcli login                              # mint/refresh a session
+ttcli tui                                # tasks · calendar · pomo · habits (press ? for keys)
 ttcli ls                                 # list projects/lists
 ttcli tasks <project>                    # live tasks in a project (id or name)
 ttcli add "buy milk" -p Home -P high     # create a task (flags before or after title)
 ttcli done <project> <task-id>           # mark complete
 ttcli rm <project> <task-id>             # delete
 ttcli focus [YYYY-MM-DD]                 # pomodoro/focus summary for a day
+ttcli focus start --duration 5 --title "test" -p Inbox   # live 5m timer
+ttcli focus status | pause | stop        # control timer (stop logs to TickTick)
 ttcli raw /api/v2/...                    # GET an arbitrary API path (debug)
 ttcli version
 ```
@@ -111,5 +114,7 @@ name (case-insensitive), or `inbox`.
 ## Status
 
 Implemented: login/auto-refresh, `ls`, `tasks`, `add`, `done`, `rm`,
-`focus`, `raw`.
-Planned: KOReader reading telemetry and a coaching daemon for `ru0`/`nas0`.
+`focus` (summary + live timer with TickTick sync), `raw`, **`tui`**
+(four views, scrollable `?` help, Nerd Font icons).
+Planned: KOReader reading telemetry, Open API OAuth option, habit check-in.
+See [docs/ROADMAP.md](docs/ROADMAP.md) for TUI phases and API strategy.

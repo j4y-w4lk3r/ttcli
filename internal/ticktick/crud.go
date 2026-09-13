@@ -132,10 +132,10 @@ func (c *Client) GetProject(projectRef string) (map[string]any, error) {
 func (c *Client) CreateProject(name, folder, color, kind string) (string, error) {
 	id := generateID()
 	item := map[string]any{
-		"id":        id,
-		"name":      name,
-		"view_mode": "list",
-		"kind":      "TASK",
+		"id":       id,
+		"name":     name,
+		"viewMode": "list",
+		"kind":     "TASK",
 	}
 	if kind != "" {
 		item["kind"] = strings.ToUpper(kind)
@@ -145,13 +145,13 @@ func (c *Client) CreateProject(name, folder, color, kind string) (string, error)
 	}
 	if folder != "" {
 		if strings.EqualFold(folder, "none") || folder == "-" {
-			item["group_id"] = "NONE"
+			item["groupId"] = "NONE"
 		} else {
 			g, err := c.ResolveProjectGroup(folder)
 			if err != nil {
 				return "", err
 			}
-			item["group_id"] = g.ID
+			item["groupId"] = g.ID
 		}
 	}
 	payload := batchProjectPayload{Add: []any{item}, Update: []any{}, Delete: []string{}}
@@ -243,11 +243,18 @@ func (c *Client) EditTask(query string, edit TaskEdit) error {
 		task["priority"] = *edit.Priority
 	}
 	if edit.Project != "" {
-		pid, err := c.ResolveProject(edit.Project)
+		toPID, err := c.ResolveProject(edit.Project)
 		if err != nil {
 			return err
 		}
-		task["projectId"] = pid
+		fromPID, _ := task["projectId"].(string)
+		if fromPID != toPID {
+			_, err := c.moveTaskMap(task, fromPID, edit.Project)
+			return err
+		}
+	}
+	if edit.Title == nil && edit.Content == nil && edit.Priority == nil {
+		return nil
 	}
 	task["modifiedTime"] = time.Now().UTC().Format(ticktickTimeLayout)
 
