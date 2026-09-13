@@ -1,9 +1,9 @@
 package notify
 
 import (
+	"os"
 	"os/exec"
 	"strconv"
-	"syscall"
 	"time"
 )
 
@@ -68,7 +68,9 @@ func CancelOverlay() {
 
 func stopNTOverlay(pid int) {
 	if pid > 0 {
-		_ = syscall.Kill(pid, syscall.SIGTERM)
+		if proc, err := os.FindProcess(pid); err == nil {
+			_ = proc.Kill()
+		}
 	}
 	if path, _ := exec.LookPath("pkill"); path != "" {
 		for _, pattern := range []string{"nt-escalate", "nt escalate", "escalate-overlay"} {
