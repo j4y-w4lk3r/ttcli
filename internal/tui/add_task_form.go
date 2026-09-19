@@ -19,21 +19,37 @@ const (
 	addTaskFieldDue
 	addTaskFieldTime
 	addTaskFieldDuration
+	addTaskFieldFocus
+	addTaskFieldRepeat
+	addTaskFieldRepeatFrom
+	addTaskFieldRepeatRule
 	addTaskFieldReminder
 	addTaskFieldPriority
 	addTaskFieldCount
 )
 
 var (
-	addTaskFieldLabels = []string{"Title", "Notes", "Due date", "Time", "Duration", "Reminder", "Priority"}
+	addTaskFieldLabels = []string{"Title", "Notes", "Due date", "Start time", "Duration", "Planned focus", "Repeat", "Repeat from", "Custom rule", "Reminder", "Priority"}
 	addTaskFieldHints  = []string{
 		"required",
 		"optional · Enter for new line",
 		"DD/MM/YYYY · empty = none",
 		"HH:MM · empty = all day",
-		"minutes · empty = none",
+		"calendar block minutes · empty = none",
+		"75m or 3p · native TickTick estimate",
+		"none · daily · weekdays · weekly · custom",
+		"due date · completion date",
+		"RRULE:… or ERULE:…",
 		"none · 0 · 5 · 15 · 30 · 60",
 		"none · low · med · high",
+	}
+	addTaskRepeatOpts     = []string{"none", "daily", "weekdays", "weekly", "custom"}
+	addTaskRepeatFromOpts = []struct {
+		label string
+		value int
+	}{
+		{"due date", ticktick.RepeatFromDue},
+		{"completion date", ticktick.RepeatFromCompletion},
 	}
 	addTaskReminderOpts = []struct {
 		label string
@@ -86,6 +102,8 @@ func (m *model) blurTaskFormInputs() {
 	m.addTaskDueInput.Blur()
 	m.addTaskTimeInput.Blur()
 	m.addTaskDurationInput.Blur()
+	m.addTaskFocusInput.Blur()
+	m.addTaskRepeatInput.Blur()
 }
 
 func taskTitleInputView(in textinput.Model, contentW int) string {
@@ -108,17 +126,35 @@ func (m *model) openEditTaskForm(t ticktick.Task) {
 	m.taskTitleInput.SetValue(t.Title)
 	m.taskTitleInput.Placeholder = ""
 	m.taskTitleInput.CursorEnd()
-	m.addTaskNotesInput.SetValue(stripTaskHTML(t.Content))
+	notes := t.Content
+	if strings.TrimSpace(notes) == "" {
+		notes = t.Desc
+	}
+	m.addTaskNotesInput.SetValue(stripTaskHTML(notes))
 	m.addTaskNotesInput.CursorEnd()
 	m.addTaskDueInput.SetValue(formatDueDMY(t.DueDate))
-	if !t.IsAllDay && hasDueTime(t.DueDate) {
-		m.addTaskTimeInput.SetValue(dueTaskClock(t))
+	if !t.IsAllDay && hasDueTime(t.StartDate) {
+		if start, ok := parseDueTime(t.StartDate); ok {
+			m.addTaskTimeInput.SetValue(start.Format("15:04"))
+		}
 	}
 	if dur := taskDurationMinutes(t); dur != "" {
 		m.addTaskDurationInput.SetValue(dur)
 	}
 	m.addTaskPriorityIdx = priorityOptionIndex(t.Priority.Int())
 	m.addTaskReminderIdx = reminderOptionIndex(t)
+	if seconds, pomos, ok := t.FocusEstimate(); ok {
+		if seconds > 0 {
+			m.addTaskFocusInput.SetValue(strconv.FormatInt((seconds+59)/60, 10) + "m")
+		} else {
+			m.addTaskFocusInput.SetValue(strconv.Itoa(pomos) + "p")
+		}
+	}
+	m.addTaskRepeatIdx = repeatOptionIndex(t.RepeatFlag)
+	m.addTaskRepeatFromIdx = repeatFromOptionIndex(t.RepeatFrom.Int())
+	if addTaskRepeatOpts[m.addTaskRepeatIdx] == "custom" {
+		m.addTaskRepeatInput.SetValue(t.RepeatFlag)
+	}
 	m.addTaskField = addTaskFieldTitle
 	m.focusAddTaskField()
 }
@@ -128,6 +164,8 @@ func (m *model) resetTaskFormFields() {
 	m.addTaskField = addTaskFieldTitle
 	m.addTaskReminderIdx = 1
 	m.addTaskPriorityIdx = 0
+	m.addTaskRepeatIdx = 0
+	m.addTaskRepeatFromIdx = 0
 	m.taskTitleInput.SetValue("")
 	m.taskTitleInput.Placeholder = "task title…"
 	m.addTaskNotesInput.Reset()
@@ -135,6 +173,8 @@ func (m *model) resetTaskFormFields() {
 	m.addTaskDueInput.Placeholder = "DD/MM/YYYY"
 	m.addTaskTimeInput.SetValue("")
 	m.addTaskDurationInput.SetValue("")
+	m.addTaskFocusInput.SetValue("")
+	m.addTaskRepeatInput.SetValue("")
 	m.focusAddTaskField()
 }
 
@@ -149,6 +189,25 @@ func priorityOptionIndex(v int) int {
 		}
 	}
 	return best
+}
+
+func repeatOptionIndex(rule string) int {
+	preset := ticktick.RecurrencePreset(rule)
+	for i, option := range addTaskRepeatOpts {
+		if option == preset {
+			return i
+		}
+	}
+	return 0
+}
+
+func repeatFromOptionIndex(value int) int {
+	for i, option := range addTaskRepeatFromOpts {
+		if option.value == value {
+			return i
+		}
+	}
+	return 0
 }
 
 func reminderOptionIndex(t ticktick.Task) int {
@@ -193,6 +252,8 @@ func (m *model) focusAddTaskField() {
 	m.addTaskDueInput.Blur()
 	m.addTaskTimeInput.Blur()
 	m.addTaskDurationInput.Blur()
+	m.addTaskFocusInput.Blur()
+	m.addTaskRepeatInput.Blur()
 	switch m.addTaskField {
 	case addTaskFieldTitle:
 		m.taskTitleInput.Focus()
@@ -205,7 +266,28 @@ func (m *model) focusAddTaskField() {
 		m.addTaskTimeInput.Focus()
 	case addTaskFieldDuration:
 		m.addTaskDurationInput.Focus()
+	case addTaskFieldFocus:
+		m.addTaskFocusInput.Focus()
+	case addTaskFieldRepeatRule:
+		m.addTaskRepeatInput.Focus()
 	}
+}
+
+func (m model) taskFormFieldVisible(field int) bool {
+	return field != addTaskFieldRepeatRule || addTaskRepeatOpts[m.addTaskRepeatIdx] == "custom"
+}
+
+func (m model) nextTaskFormField(field, delta int) int {
+	if delta == 0 {
+		return field
+	}
+	for i := 0; i < addTaskFieldCount; i++ {
+		field = (field + delta + addTaskFieldCount) % addTaskFieldCount
+		if m.taskFormFieldVisible(field) {
+			return field
+		}
+	}
+	return field
 }
 
 func taskNotesInputView(ta textarea.Model, contentW int) []string {
@@ -234,14 +316,19 @@ func (m model) renderAddTaskForm(width, innerLines int) string {
 	title := truncateInner(headerStyle.Render(header), contentW)
 	var lines []string
 	lines = append(lines, title, "")
+	selectedLine := 0
 
 	for i := 0; i < addTaskFieldCount; i++ {
+		if !m.taskFormFieldVisible(i) {
+			continue
+		}
 		label := addTaskFieldLabels[i]
 		hint := addTaskFieldHints[i]
 		active := i == m.addTaskField
 		labelSt := hintStyle
 		if active {
 			labelSt = listSelStyle
+			selectedLine = len(lines)
 		}
 		lines = append(lines, truncateInner(labelSt.Render(fmt.Sprintf("%s  %s", label, hintStyle.Render("("+hint+")"))), contentW))
 		switch i {
@@ -255,6 +342,14 @@ func (m model) renderAddTaskForm(width, innerLines int) string {
 			lines = append(lines, truncateInner(m.addTaskTimeInput.View(), contentW))
 		case addTaskFieldDuration:
 			lines = append(lines, truncateInner(m.addTaskDurationInput.View(), contentW))
+		case addTaskFieldFocus:
+			lines = append(lines, truncateInner(m.addTaskFocusInput.View(), contentW))
+		case addTaskFieldRepeat:
+			lines = append(lines, truncateInner(m.renderAddTaskChoice(addTaskRepeatOpts[m.addTaskRepeatIdx], active), contentW))
+		case addTaskFieldRepeatFrom:
+			lines = append(lines, truncateInner(m.renderAddTaskChoice(addTaskRepeatFromOpts[m.addTaskRepeatFromIdx].label, active), contentW))
+		case addTaskFieldRepeatRule:
+			lines = append(lines, truncateInner(m.addTaskRepeatInput.View(), contentW))
 		case addTaskFieldReminder:
 			lines = append(lines, truncateInner(m.renderAddTaskChoice(addTaskReminderOpts[m.addTaskReminderIdx].label, active), contentW))
 		case addTaskFieldPriority:
@@ -264,8 +359,23 @@ func (m model) renderAddTaskForm(width, innerLines int) string {
 			lines = append(lines, "")
 		}
 	}
+	if preview := m.taskFormPreview(); preview != "" {
+		lines = append(lines, "", truncateInner(sectionHeader("Plan preview", contentW), contentW))
+		lines = append(lines, truncateInner(hintStyle.Render(preview), contentW))
+	}
 	if h := m.keyHint("tab next · shift+tab prev · [/] cycle · enter next/save · esc cancel · notes: enter = newline"); h != "" {
 		lines = append(lines, "", truncateInner(h, contentW))
+	}
+	if len(lines) > innerLines {
+		window := computeScrollWindow(selectedLine, len(lines), innerLines)
+		visible := append([]string(nil), lines[window.Start:window.End]...)
+		if window.Start > 0 && len(visible) > 0 {
+			visible[0] = truncateInner(hintStyle.Render("↑ more fields"), contentW)
+		}
+		if window.End < len(lines) && len(visible) > 0 {
+			visible[len(visible)-1] = truncateInner(hintStyle.Render("↓ more fields"), contentW)
+		}
+		return fitLines(strings.Join(visible, "\n"), innerLines)
 	}
 	return fitLines(strings.Join(lines, "\n"), innerLines)
 }
@@ -278,6 +388,34 @@ func (m model) renderAddTaskChoice(value string, active bool) string {
 	return "  " + st.Render(value)
 }
 
+func (m model) taskFormPreview() string {
+	var parts []string
+	dateValue := strings.TrimSpace(m.addTaskDueInput.Value())
+	timeValue := strings.TrimSpace(m.addTaskTimeInput.Value())
+	durationValue := strings.TrimSpace(m.addTaskDurationInput.Value())
+	if dateValue != "" {
+		schedule := dateValue
+		if timeValue != "" {
+			schedule += " " + timeValue
+			if minutes, err := strconv.Atoi(durationValue); err == nil && minutes > 0 {
+				if start, err := time.Parse("15:04", timeValue); err == nil {
+					schedule += "–" + start.Add(time.Duration(minutes)*time.Minute).Format("15:04")
+				}
+			}
+		} else {
+			schedule += " all day"
+		}
+		parts = append(parts, schedule)
+	}
+	if plan, err := m.parseTaskFocusPlan(); err == nil && plan != nil && !plan.Clear {
+		parts = append(parts, fmt.Sprintf("%dm focus · %d pomos", plan.Minutes, plan.Pomos))
+	}
+	if repeat := addTaskRepeatOpts[m.addTaskRepeatIdx]; repeat != "none" {
+		parts = append(parts, repeat+" from "+addTaskRepeatFromOpts[m.addTaskRepeatFromIdx].label)
+	}
+	return strings.Join(parts, " · ")
+}
+
 func (m model) updateAddTaskForm(msg tea.KeyMsg) (model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
@@ -286,14 +424,11 @@ func (m model) updateAddTaskForm(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.blurTaskFormInputs()
 		return m, nil
 	case "tab":
-		m.addTaskField = (m.addTaskField + 1) % addTaskFieldCount
+		m.addTaskField = m.nextTaskFormField(m.addTaskField, 1)
 		m.focusAddTaskField()
 		return m, textinput.Blink
 	case "shift+tab":
-		m.addTaskField--
-		if m.addTaskField < 0 {
-			m.addTaskField = addTaskFieldCount - 1
-		}
+		m.addTaskField = m.nextTaskFormField(m.addTaskField, -1)
 		m.focusAddTaskField()
 		return m, textinput.Blink
 	case "enter":
@@ -303,7 +438,7 @@ func (m model) updateAddTaskForm(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, cmd
 		}
 		if m.addTaskField < addTaskFieldCount-1 {
-			m.addTaskField++
+			m.addTaskField = m.nextTaskFormField(m.addTaskField, 1)
 			m.focusAddTaskField()
 			return m, textinput.Blink
 		}
@@ -312,15 +447,28 @@ func (m model) updateAddTaskForm(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.errMsg = err.Error()
 			return m, nil
 		}
+		focusPlan, err := m.parseTaskFocusPlan()
+		if err != nil {
+			m.errMsg = err.Error()
+			return m, nil
+		}
+		recurrence, clearRecurrence, err := m.parseTaskRecurrence(sched)
+		if err != nil {
+			m.errMsg = err.Error()
+			return m, nil
+		}
 		title := strings.TrimSpace(m.taskTitleInput.Value())
-		notes := strings.TrimSpace(m.addTaskNotesInput.Value())
+		notes := taskNotesToHTML(m.addTaskNotesInput.Value())
 		priority := addTaskPriorityOpts[m.addTaskPriorityIdx].value
 		if m.mode == modeEditTask {
 			if m.editTaskID == "" {
 				m.errMsg = "no task selected"
 				return m, nil
 			}
-			return m, updateTaskCmd(m.client, m.editTaskID, m.projectID, title, notes, priority, sched, clearDue)
+			return m, updateTaskCmd(
+				m.client, m.editTaskID, m.projectID, title, notes, priority,
+				sched, clearDue, recurrence, clearRecurrence, focusPlan,
+			)
 		}
 		if m.projectID == "" {
 			m.errMsg = "select a list first"
@@ -335,8 +483,24 @@ func (m model) updateAddTaskForm(msg tea.KeyMsg) (model, tea.Cmd) {
 		if !clearDue && sched != nil {
 			createIn.Schedule = sched
 		}
+		createIn.Recurrence = recurrence
+		createIn.FocusPlan = focusPlan
 		return m, createTaskCmd(m.client, createIn)
 	case "[", "left":
+		if m.addTaskField == addTaskFieldRepeat {
+			m.addTaskRepeatIdx--
+			if m.addTaskRepeatIdx < 0 {
+				m.addTaskRepeatIdx = len(addTaskRepeatOpts) - 1
+			}
+			return m, nil
+		}
+		if m.addTaskField == addTaskFieldRepeatFrom {
+			m.addTaskRepeatFromIdx--
+			if m.addTaskRepeatFromIdx < 0 {
+				m.addTaskRepeatFromIdx = len(addTaskRepeatFromOpts) - 1
+			}
+			return m, nil
+		}
 		if m.addTaskField == addTaskFieldReminder {
 			m.addTaskReminderIdx--
 			if m.addTaskReminderIdx < 0 {
@@ -352,6 +516,14 @@ func (m model) updateAddTaskForm(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, nil
 		}
 	case "]", "right":
+		if m.addTaskField == addTaskFieldRepeat {
+			m.addTaskRepeatIdx = (m.addTaskRepeatIdx + 1) % len(addTaskRepeatOpts)
+			return m, nil
+		}
+		if m.addTaskField == addTaskFieldRepeatFrom {
+			m.addTaskRepeatFromIdx = (m.addTaskRepeatFromIdx + 1) % len(addTaskRepeatFromOpts)
+			return m, nil
+		}
 		if m.addTaskField == addTaskFieldReminder {
 			m.addTaskReminderIdx = (m.addTaskReminderIdx + 1) % len(addTaskReminderOpts)
 			return m, nil
@@ -381,6 +553,10 @@ func (m model) updateAddTaskForm(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.addTaskTimeInput, cmd = m.addTaskTimeInput.Update(msg)
 	case addTaskFieldDuration:
 		m.addTaskDurationInput, cmd = m.addTaskDurationInput.Update(msg)
+	case addTaskFieldFocus:
+		m.addTaskFocusInput, cmd = m.addTaskFocusInput.Update(msg)
+	case addTaskFieldRepeatRule:
+		m.addTaskRepeatInput, cmd = m.addTaskRepeatInput.Update(msg)
 	}
 	return m, cmd
 }
@@ -413,7 +589,7 @@ func (m model) parseTaskFormSchedule() (*ticktick.TaskSchedule, bool, error) {
 		d = d.Add(time.Duration(hh)*time.Hour + time.Duration(mm)*time.Minute)
 	}
 	sched := &ticktick.TaskSchedule{
-		Due:         d,
+		Start:       d,
 		HasDue:      true,
 		AllDay:      allDay,
 		HasReminder: addTaskReminderOpts[m.addTaskReminderIdx].mins >= 0,
@@ -433,14 +609,77 @@ func (m model) parseTaskFormSchedule() (*ticktick.TaskSchedule, bool, error) {
 	return sched, false, nil
 }
 
-func updateTaskCmd(c *ticktick.Client, taskID, projectID, title, content string, priority int, sched *ticktick.TaskSchedule, clearDue bool) tea.Cmd {
+func (m model) parseTaskFocusPlan() (*ticktick.TaskFocusPlan, error) {
+	raw := strings.ToLower(strings.TrimSpace(m.addTaskFocusInput.Value()))
+	if raw == "" {
+		if m.mode == modeEditTask {
+			return &ticktick.TaskFocusPlan{Clear: true}, nil
+		}
+		return nil, nil
+	}
+	unit := byte('m')
+	if last := raw[len(raw)-1]; last == 'm' || last == 'p' {
+		unit = last
+		raw = strings.TrimSpace(raw[:len(raw)-1])
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 1 {
+		return nil, fmt.Errorf("planned focus: use minutes or pomos, e.g. 75m or 3p")
+	}
+	minutes, pomos := value, 0
+	if unit == 'p' {
+		pomos = value
+		minutes = value * ticktick.StandardPomoMinutes
+	} else {
+		pomos = (minutes + ticktick.StandardPomoMinutes - 1) / ticktick.StandardPomoMinutes
+	}
+	if pomos > 60 {
+		return nil, fmt.Errorf("planned focus: maximum is 60 pomos")
+	}
+	return &ticktick.TaskFocusPlan{Minutes: minutes, Pomos: pomos}, nil
+}
+
+func (m model) parseTaskRecurrence(schedule *ticktick.TaskSchedule) (*ticktick.TaskRecurrence, bool, error) {
+	preset := addTaskRepeatOpts[m.addTaskRepeatIdx]
+	if preset == "none" {
+		return nil, m.mode == modeEditTask, nil
+	}
+	if schedule == nil || !schedule.HasDue {
+		return nil, false, fmt.Errorf("repeat requires a due date")
+	}
+	rule := ""
+	if preset == "custom" {
+		rule = m.addTaskRepeatInput.Value()
+	} else {
+		rule = ticktick.RecurrencePresetRule(preset, schedule.Start)
+	}
+	recurrence, err := ticktick.NewTaskRecurrence(rule, addTaskRepeatFromOpts[m.addTaskRepeatFromIdx].value)
+	if err != nil {
+		return nil, false, fmt.Errorf("repeat: %w", err)
+	}
+	return recurrence, false, nil
+}
+
+func updateTaskCmd(
+	c *ticktick.Client,
+	taskID, projectID, title, content string,
+	priority int,
+	sched *ticktick.TaskSchedule,
+	clearDue bool,
+	recurrence *ticktick.TaskRecurrence,
+	clearRecurrence bool,
+	focusPlan *ticktick.TaskFocusPlan,
+) tea.Cmd {
 	return func() tea.Msg {
 		in := ticktick.TaskUpdateInput{
-			Title:    title,
-			Content:  content,
-			Priority: priority,
-			Schedule: sched,
-			ClearDue: clearDue,
+			Title:           title,
+			Content:         content,
+			Priority:        priority,
+			Schedule:        sched,
+			ClearDue:        clearDue,
+			Recurrence:      recurrence,
+			ClearRecurrence: clearRecurrence,
+			FocusPlan:       focusPlan,
 		}
 		err := c.UpdateTask(taskID, projectID, in)
 		return taskUpdatedMsg{title: title, err: err}

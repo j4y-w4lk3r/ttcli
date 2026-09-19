@@ -3,7 +3,9 @@ package ticktick
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -17,10 +19,64 @@ func (c *Client) Ping() error {
 // CompletedTasks returns recently completed tasks account-wide.
 func (c *Client) CompletedTasks() ([]Task, error) {
 	var tasks []Task
-	if err := c.getJSON("/api/v2/project/all/closed", &tasks); err != nil {
+	if err := c.getJSON("/api/v2/project/all/closed?status=Completed", &tasks); err != nil {
 		return nil, err
 	}
 	return tasks, nil
+}
+
+// CompletedTasksInRange asks TickTick to limit closed tasks to a time range.
+// The local filter in TasksCompletedOn remains authoritative if the private
+// endpoint returns a wider window.
+func (c *Client) CompletedTasksInRange(start, end time.Time) ([]Task, error) {
+	values := url.Values{}
+	values.Set("from", start.UTC().Format(ticktickTimeLayout))
+	values.Set("to", end.UTC().Format(ticktickTimeLayout))
+	values.Set("limit", strconv.Itoa(500))
+	// TickTick now requires the closed-task status discriminator. Omitting it
+	// produces an opaque HTTP 500 from the private endpoint.
+	values.Set("status", "Completed")
+	var tasks []Task
+	if err := c.getJSON("/api/v2/project/all/closed?"+values.Encode(), &tasks); err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
+// TasksCompletedBetween returns tasks whose completion timestamp falls within
+// the inclusive local date range.
+func (c *Client) TasksCompletedBetween(startDay, endDay time.Time) ([]Task, error) {
+	start, _ := LocalDayBounds(startDay)
+	_, end := LocalDayBounds(endDay)
+	tasks, err := c.CompletedTasksInRange(start, end)
+	if err != nil {
+		// The private API has changed its accepted range parameters before.
+		// Fall back to the unbounded completed feed and retain the authoritative
+		// local date filter below instead of breaking Calendar.
+		tasks, err = c.CompletedTasks()
+		if err != nil {
+			return nil, err
+		}
+	}
+	out := tasks[:0]
+	for _, task := range tasks {
+		if task.CompletedT == "" {
+			continue
+		}
+		completedAt, err := ParseAPITime(task.CompletedT)
+		if err != nil {
+			continue
+		}
+		local := completedAt.In(time.Local)
+		if local.Before(start) || local.After(end) {
+			continue
+		}
+		out = append(out, task)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CompletedT < out[j].CompletedT
+	})
+	return out, nil
 }
 
 // TasksCompletedOn returns tasks completed on the given local calendar day.
@@ -28,29 +84,7 @@ func (c *Client) TasksCompletedOn(day time.Time) ([]Task, error) {
 	if day.IsZero() {
 		day = time.Now()
 	}
-	tasks, err := c.CompletedTasks()
-	if err != nil {
-		return nil, err
-	}
-	y, m, d := day.Date()
-	out := tasks[:0]
-	for _, t := range tasks {
-		if t.CompletedT == "" {
-			continue
-		}
-		ct, err := time.Parse(ticktickTimeLayout, t.CompletedT)
-		if err != nil {
-			continue
-		}
-		cy, cm, cd := ct.Date()
-		if cy == y && cm == m && cd == d {
-			out = append(out, t)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].CompletedT < out[j].CompletedT
-	})
-	return out, nil
+	return c.TasksCompletedBetween(day, day)
 }
 
 // AllOpenTasks returns active tasks across all lists.

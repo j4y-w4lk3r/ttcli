@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 )
 
 func TestCalMonthColumnWidthsSumToFull(t *testing.T) {
@@ -27,7 +28,7 @@ func TestComputeCalMonthLayoutFillsHeight(t *testing.T) {
 		t.Fatalf("grid exceeds innerLines: overhead+used=%d outerH=%d innerH=%d pad=%d",
 			5+used, lay.cellOuterH(), lay.CellInnerH, lay.PadLines)
 	}
-	if lay.CellInnerH < 2 {
+	if lay.CellInnerH < 3 {
 		t.Fatalf("cellInnerH=%d too small", lay.CellInnerH)
 	}
 }
@@ -49,6 +50,9 @@ func TestJoinMonthWeekRowExactWidth(t *testing.T) {
 	for _, ln := range joinMonthWeekRow(cells, lay) {
 		if lipgloss.Width(ln) != lay.FullW {
 			t.Fatalf("row width=%d want %d", lipgloss.Width(ln), lay.FullW)
+		}
+		if runewidth.StringWidth(stripANSI(ln)) != lay.FullW {
+			t.Fatalf("runewidth=%d want %d line=%q", runewidth.StringWidth(stripANSI(ln)), lay.FullW, stripANSI(ln))
 		}
 	}
 	if len(joinMonthWeekRow(cells, lay)) != lay.cellOuterH() {

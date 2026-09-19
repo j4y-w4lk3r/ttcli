@@ -10,21 +10,13 @@ import (
 )
 
 var (
-	calMonthCellBorder = lipgloss.NewStyle().
-				Border(lipgloss.NormalBorder()).
-				BorderForeground(colorSurface)
-	calMonthCellSelBorder = lipgloss.NewStyle().
-				Border(lipgloss.NormalBorder()).
-				BorderForeground(colorMauve)
-	calMonthCellTodayBorder = lipgloss.NewStyle().
-				Border(lipgloss.NormalBorder()).
-				BorderForeground(colorGreen)
-	calMonthDayNumStyle = lipgloss.NewStyle().Foreground(colorMuted)
-	calMonthDaySelStyle = lipgloss.NewStyle().Bold(true).Foreground(colorBase).Background(colorMauve).Padding(0, 1)
+	calMonthDayNumStyle   = lipgloss.NewStyle().Foreground(colorMuted)
+	calMonthDaySelStyle   = lipgloss.NewStyle().Bold(true).Foreground(colorBase).Background(colorMauve).Padding(0, 1)
 	calMonthDayTodayStyle = lipgloss.NewStyle().Bold(true).Foreground(colorBase).Background(colorGreen).Padding(0, 1)
 )
 
-func calMonthTaskChip(t ticktick.Task, width int, done bool) string {
+func calMonthTaskChip(entry calEntry, width int) string {
+	t := entry.Task
 	if width < 6 {
 		width = 6
 	}
@@ -48,10 +40,19 @@ func calMonthTaskChip(t ticktick.Task, width int, done bool) string {
 	col := taskPriorityColor(t.Priority.Int())
 	bar := lipgloss.NewStyle().Foreground(col).Render("▌")
 	titleSt := listIdleStyle
-	if done {
+	if entry.Done() {
 		titleSt = taskDoneStyle
 	}
-	line := bar + titleSt.Render(title)
+	marker := ""
+	if entry.Done() {
+		marker = iconCheck + " "
+	} else if entry.State == calEntryPending {
+		marker = iconRefresh + " "
+	}
+	if entry.LocalOnly() {
+		title += " · local"
+	}
+	line := bar + marker + titleSt.Render(title)
 	gap := width - lipgloss.Width(line) - clockW
 	if gap < 1 {
 		gap = 1
@@ -59,15 +60,30 @@ func calMonthTaskChip(t ticktick.Task, width int, done bool) string {
 	return truncateInner(line+strings.Repeat(" ", gap)+clockPart, width)
 }
 
-func renderCalMonthCellBordered(inner []string, innerW, innerH, colW int, border lipgloss.Style) []string {
+func renderCalMonthCellBordered(inner []string, innerW, innerH, colW int, fg lipgloss.Color) []string {
+	if innerW < 1 {
+		innerW = 1
+	}
+	if innerH < 1 {
+		innerH = 1
+	}
 	for len(inner) < innerH {
 		inner = append(inner, strings.Repeat(" ", innerW))
 	}
 	if len(inner) > innerH {
 		inner = inner[:innerH]
 	}
-	boxed := border.Width(innerW).Height(innerH).Render(strings.Join(inner, "\n"))
-	lines := strings.Split(strings.TrimSuffix(boxed, "\n"), "\n")
+	border := lipgloss.NewStyle().Foreground(fg)
+	top := border.Render("┌" + strings.Repeat("─", innerW) + "┐")
+	bot := border.Render("└" + strings.Repeat("─", innerW) + "┘")
+	side := border.Render("│")
+	lines := make([]string, 0, innerH+calMonthBorderLines)
+	lines = append(lines, top)
+	for i := 0; i < innerH; i++ {
+		content := padToWidth(truncateRenderedWidth(inner[i], innerW), innerW)
+		lines = append(lines, side+content+side)
+	}
+	lines = append(lines, bot)
 	return normalizeCellLines(lines, innerH+calMonthBorderLines, colW)
 }
 
@@ -77,8 +93,7 @@ func renderCalMonthEmptyCell(colW, innerH int) []string {
 		innerW = 1
 	}
 	inner := make([]string, innerH)
-	border := lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(colorMuted)
-	return renderCalMonthCellBordered(inner, innerW, innerH, colW, border)
+	return renderCalMonthCellBordered(inner, innerW, innerH, colW, colorMuted)
 }
 
 func renderCalMonthCell(
@@ -87,8 +102,10 @@ func renderCalMonthCell(
 	colW, innerH int,
 	selDay time.Time,
 	now time.Time,
+	focusStats *ticktick.FocusStats,
+	dailyGoal int,
 ) []string {
-	tasks := idx.onSorted(cur)
+	entries := idx.onSorted(cur)
 	inMonth := cur.Month() == selDay.Month() && cur.Year() == selDay.Year()
 	isSel := inMonth && cur.Day() == selDay.Day()
 	isToday := dateKey(cur) == dateKey(now)
@@ -114,38 +131,44 @@ func renderCalMonthCell(
 	}
 	inner[0] = truncateInner(alignRightInWidth("", dayStyled, innerW), innerW)
 
-	taskLines := innerH - 1
-	if taskLines < 1 {
-		taskLines = 1
-	}
+	taskLines := max(innerH-2, 0)
 	show := taskLines
-	if len(tasks) > show {
+	if len(entries) > show {
 		show = taskLines - 1
-		if show < 1 {
-			show = 1
-		}
+		show = max(show, 0)
 	}
-	for i := 0; i < show && i < len(tasks); i++ {
-		done := calTaskShouldBeDone(tasks[i], cur, now)
-		inner[i+1] = truncateInner(calMonthTaskChip(tasks[i], innerW-1, done), innerW)
+	for i := 0; i < show && i < len(entries); i++ {
+		inner[i+1] = truncateInner(calMonthTaskChip(entries[i], innerW-1), innerW)
 	}
-	if len(tasks) > show && taskLines > show && show+1 < innerH {
-		extra := len(tasks) - show
+	if len(entries) > show && taskLines > show && show+1 < innerH {
+		extra := len(entries) - show
 		inner[show+1] = truncateInner(hintStyle.Render(fmt.Sprintf("+%d more", extra)), innerW)
 	}
+	if innerH > 1 {
+		completed, focusedMinutes := 0, 0
+		if focusStats != nil {
+			completed = focusStats.FullPomoCount
+			focusedMinutes = int((focusStats.TotalSeconds + 30) / 60)
+		}
+		focusLabel := fmt.Sprintf("%s %d/%d", iconPomodoro, completed, max(dailyGoal, 1))
+		if innerW >= 20 && focusedMinutes > 0 {
+			focusLabel += fmt.Sprintf(" · %dm", focusedMinutes)
+		}
+		inner[innerH-1] = truncateInner(pomoTodayStyle(completed, dailyGoal).Render(focusLabel), innerW)
+	}
 
-	border := calMonthCellBorder
+	fg := colorSurface
 	switch {
 	case isSel:
-		border = calMonthCellSelBorder
+		fg = colorMauve
 	case isToday:
-		border = calMonthCellTodayBorder
+		fg = colorGreen
 	}
-	return renderCalMonthCellBordered(inner, innerW, innerH, colW, border)
+	return renderCalMonthCellBordered(inner, innerW, innerH, colW, fg)
 }
 
 func renderCalMonthDOWHeader(lay calMonthLayout) string {
-	headers := []string{"Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"}
+	headers := []string{"Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"}
 	parts := make([]string, 7)
 	for i, label := range headers {
 		parts[i] = padToWidth(
@@ -157,12 +180,12 @@ func renderCalMonthDOWHeader(lay calMonthLayout) string {
 }
 
 func (m model) renderCalMonthGrid(idx calIndex, l layout, monthHeaderLines int) string {
-	overhead := calMonthOverheadBeforeGrid(2, monthHeaderLines)
+	overhead := calMonthOverheadBeforeGrid(calViewTabLines, monthHeaderLines)
 	lay := computeCalMonthLayout(l.fullW, l.innerLines, overhead)
 
 	first := time.Date(m.calSelected().Year(), m.calSelected().Month(), 1, 0, 0, 0, 0, time.Local)
 	daysInMonth := time.Date(m.calSelected().Year(), m.calSelected().Month()+1, 0, 0, 0, 0, 0, time.Local).Day()
-	startDow := int(first.Weekday())
+	startDow := (int(first.Weekday()) + 6) % 7
 	now := time.Now()
 	sel := m.calSelected()
 
@@ -183,7 +206,10 @@ func (m model) renderCalMonthGrid(idx calIndex, l layout, monthHeaderLines int) 
 				continue
 			}
 			cur := time.Date(sel.Year(), sel.Month(), day, 0, 0, 0, 0, time.Local)
-			cells = append(cells, renderCalMonthCell(idx, cur, colW, lay.CellInnerH, sel, now))
+			cells = append(cells, renderCalMonthCell(
+				idx, cur, colW, lay.CellInnerH, sel, now,
+				m.calFocusByDate[dateKey(cur)], m.uiSettings.pomoDailyGoal(),
+			))
 			day++
 		}
 		gridLines = append(gridLines, joinMonthWeekRow(cells, lay)...)

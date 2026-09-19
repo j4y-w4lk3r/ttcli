@@ -23,11 +23,11 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: ttcli <command>  (try: ttcli help  or  ttcli shell)")
-		os.Exit(2)
+	args := os.Args[1:]
+	if len(args) == 0 {
+		args = []string{"tui"}
 	}
-	if err := runCommand(os.Args[1:]); err != nil {
+	if err := runCommand(args); err != nil {
 		fmt.Fprintf(os.Stderr, "ttcli: %v\n", err)
 		os.Exit(1)
 	}

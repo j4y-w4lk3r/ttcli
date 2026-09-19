@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/x/ansi"
+	"github.com/j4y-w4lk3r/ttcli/internal/planning"
 	"github.com/j4y-w4lk3r/ttcli/internal/ticktick"
 )
 
@@ -25,6 +26,9 @@ func (m model) renderTasksView(l layout) string {
 }
 
 func (m model) renderTasksRightPane(l layout, focused bool) string {
+	if m.mode == modeConfirmDelete {
+		return renderPane(m.renderTasks(l), l, l.rightBoxW, focused)
+	}
 	listBoxW, detailBoxW := taskDetailSplitWidths(l.rightBoxW)
 	if m.taskDetailUsesSide(l) && listBoxW > 0 {
 		t, ok := m.selectedTask()
@@ -61,6 +65,7 @@ func (m model) renderTasksList(l layout, detailBudget int) string {
 	if m.projectName != "" {
 		title = headerStyle.Render(iconTasks + " " + m.projectName)
 	}
+	title += "  " + hintStyle.Render("["+m.effectiveTaskScope().Label()+"]")
 	title = truncateInner(title, contentW)
 
 	tasks := m.visibleTaskRows()
@@ -196,7 +201,18 @@ func (m model) renderTasks(l layout) string {
 	if m.projectName != "" {
 		title = headerStyle.Render(iconTasks + " " + m.projectName)
 	}
+	title += "  " + hintStyle.Render("["+m.effectiveTaskScope().Label()+"]")
 	title = truncateInner(title, contentW)
+
+	if m.mode == modeConfirmDelete {
+		count := len(m.pendingPermanentDelete)
+		items := []string{
+			errStyle.Render(fmt.Sprintf("Permanently delete %d task(s)?", count)),
+			"Full snapshots will be saved to the local archive first.",
+			"This cannot be undone in TickTick.",
+		}
+		return fillInner(title, truncateInner(hintStyle.Render("y/Enter confirm · n/Esc cancel"), contentW), items, l.innerLines)
+	}
 
 	if m.mode == modeAddTask || m.mode == modeEditTask {
 		return m.renderAddTaskForm(contentW, l.innerLines)
@@ -219,25 +235,10 @@ func (m model) renderTasks(l layout) string {
 
 	tasks := m.visibleTaskRows()
 	if len(tasks) == 0 {
-		open, done, trashed := m.taskCounts()
-		msg := "(no open tasks)"
-		if open == 0 && (done > 0 || trashed > 0) {
-			parts := []string{}
-			if done > 0 {
-				if m.showKeyHints {
-					parts = append(parts, fmt.Sprintf("%d done — c", done))
-				} else {
-					parts = append(parts, fmt.Sprintf("%d done", done))
-				}
-			}
-			if trashed > 0 {
-				if m.showKeyHints {
-					parts = append(parts, fmt.Sprintf("%d trashed — C", trashed))
-				} else {
-					parts = append(parts, fmt.Sprintf("%d trashed", trashed))
-				}
-			}
-			msg = "(no open · " + strings.Join(parts, " · ") + ")"
+		total, matching, _ := m.taskScopeStats()
+		msg := fmt.Sprintf("(no %s tasks)", strings.ToLower(m.effectiveTaskScope().Label()))
+		if total > 0 && matching == 0 && strings.TrimSpace(m.filterInput.Value()) != "" {
+			msg = fmt.Sprintf("(%d %s tasks · no search matches)", total, strings.ToLower(m.effectiveTaskScope().Label()))
 		}
 		return fillInner(title, truncateInner(hintStyle.Render(msg), contentW), nil, l.innerLines)
 	}
@@ -258,33 +259,46 @@ func (m model) selectedTask() (ticktick.Task, bool) {
 }
 
 func (m model) openDoneHint() string {
-	open, done, trashed := m.taskCounts()
-	var parts []string
-	if open > 0 {
-		parts = append(parts, fmt.Sprintf("%d open", open))
+	total, matching, shown := m.taskScopeStats()
+	parts := []string{fmt.Sprintf("%s · %d total", m.effectiveTaskScope().Label(), total)}
+	if strings.TrimSpace(m.filterInput.Value()) != "" {
+		parts = append(parts, fmt.Sprintf("%d matching", matching))
 	}
-	if done > 0 {
-		if m.showCompleted {
-			parts = append(parts, fmt.Sprintf("%d done", done))
-		} else if m.showKeyHints {
-			parts = append(parts, fmt.Sprintf("c → %d done", done))
-		} else {
-			parts = append(parts, fmt.Sprintf("%d done hidden", done))
+	parts = append(parts, fmt.Sprintf("%d shown", shown))
+	if m.effectiveTaskScope() != TaskScopeArchive {
+		if planned, remaining, inferred := m.listFocusEstimate(); planned > 0 {
+			prefix := ""
+			if inferred > 0 {
+				prefix = "~"
+			}
+			parts = append(parts, fmt.Sprintf(
+				"list %s%s planned · %s left",
+				prefix, planning.FormatMinutes(planned), planning.FormatMinutes(remaining),
+			))
 		}
-	}
-	if trashed > 0 {
-		if m.showDeleted {
-			parts = append(parts, fmt.Sprintf("%d trashed", trashed))
-		} else if m.showKeyHints {
-			parts = append(parts, fmt.Sprintf("C → %d trashed", trashed))
-		} else {
-			parts = append(parts, fmt.Sprintf("%d trashed hidden", trashed))
-		}
-	}
-	if len(parts) > 0 {
 		parts = append(parts, "sort "+m.taskSortMode.Label())
 	}
 	return strings.Join(parts, " · ")
+}
+
+func (m model) listFocusEstimate() (planned, remaining, inferred int) {
+	config := m.uiSettings.planningConfig()
+	for _, task := range m.tasks {
+		if task.Trashed() || task.Done() {
+			continue
+		}
+		estimate := planning.EstimateTask(task, config)
+		planned += estimate.Minutes
+		if estimate.Source == planning.EstimateDefault {
+			inferred++
+		}
+		invested := 0
+		if summary, ok := m.taskFocusSummary(task); ok {
+			invested = int((summary.TotalSeconds + 30) / 60)
+		}
+		remaining += max(estimate.Minutes-invested, 0)
+	}
+	return planned, remaining, inferred
 }
 
 func (m model) tasksPaneHint(extra string, contentW int) string {
@@ -333,13 +347,18 @@ func (m model) formatTaskLine(t ticktick.Task, depth int, selected, marked bool,
 
 	var focusPart string
 	if layout.FocusColW > 0 {
-		if s, ok := m.taskFocusSummary(t); ok {
-			focusPart = padToWidth(renderTaskFocusInline(s), layout.FocusColW) + strings.Repeat(" ", taskSuffixGap)
+		if s, ok := m.taskFocusDisplay(t); ok {
+			focusPart = padToWidth(
+				renderTaskFocusProgressInlineWithConfig(t, s, m.uiSettings.planningConfig()),
+				layout.FocusColW,
+			) + strings.Repeat(" ", taskSuffixGap)
 		} else {
 			focusPart = strings.Repeat(" ", layout.FocusColW) + strings.Repeat(" ", taskSuffixGap)
 		}
-	} else if s, ok := m.taskFocusSummary(t); ok {
-		focusPart = renderTaskFocusInline(s) + strings.Repeat(" ", taskSuffixGap)
+	} else if s, ok := m.taskFocusDisplay(t); ok {
+		focusPart = renderTaskFocusProgressInlineWithConfig(
+			t, s, m.uiSettings.planningConfig(),
+		) + strings.Repeat(" ", taskSuffixGap)
 	}
 	due := padDueWidth(dueInlineTask(t))
 	return formatTaskRow(prefix, style.Render(displayText(t.Title)), focusPart, due, layout, contentW)

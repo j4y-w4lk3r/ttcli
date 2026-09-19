@@ -66,6 +66,26 @@ func computeScrollWindow(cursor, total, maxRows int) scrollWindow {
 	}
 }
 
+func computeViewportWindow(start, cursor, total, maxRows int) scrollWindow {
+	if total <= 0 {
+		return scrollWindow{}
+	}
+	maxRows = max(maxRows, 1)
+	start = clamp(start, 0, max(total-maxRows, 0))
+	cursor = clamp(cursor, 0, total-1)
+	if cursor < start {
+		start = cursor
+	} else if cursor >= start+maxRows {
+		start = cursor - maxRows + 1
+	}
+	start = clamp(start, 0, max(total-maxRows, 0))
+	end := min(start+maxRows, total)
+	return scrollWindow{
+		Start: start, End: end, Above: start, Below: total - end,
+		Total: total, Cursor: cursor,
+	}
+}
+
 func renderScrollHint(win scrollWindow) string {
 	if win.Total == 0 || (win.Above == 0 && win.Below == 0) {
 		return ""

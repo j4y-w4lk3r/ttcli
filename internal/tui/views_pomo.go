@@ -324,8 +324,9 @@ func (m model) renderPomoFocusPanel(w, innerLines int) string {
 		pauses, _ := focus.PauseSpellsForTimeline(m.pomoViewDate, live, anchor)
 		focusSlices := aggregateFocusByTask(records)
 		legendSlices := buildLegendSlices(records, pauses, anchor)
-		lines = append(lines, truncateInner(sectionHeader(pomoDaySectionTitle(m.pomoViewDate), w), w))
-		lines = append(lines, renderFocusRing(focusSlices, pauses, anchor, w)...)
+		visualTitle := pomoDaySectionTitle(m.pomoViewDate) + " · " + m.pomoFocusDesign().Label()
+		lines = append(lines, truncateInner(sectionHeader(visualTitle, w), w))
+		lines = append(lines, m.renderPomoFocusVisual(focusSlices, pauses, anchor, w)...)
 		if done := m.renderPomoDoneSection(w); len(done) > 0 {
 			lines = append(lines, "")
 			lines = append(lines, done...)
@@ -353,7 +354,7 @@ func (m model) renderPomoFocusPanel(w, innerLines int) string {
 	if len(lines) > innerLines-1 {
 		lines = lines[:innerLines-1]
 	}
-	if h := m.keyHint("h/l legend · j/k timeline · e rename · n add · x delete · s/f start · p pause"); h != "" {
+	if h := m.keyHint("v design · +/- goal · h/l legend · j/k timeline · e rename · n add · x delete · s/f start · p pause"); h != "" {
 		lines = append(lines, truncateInner(h, w))
 	}
 	return strings.Join(lines, "\n")
@@ -384,12 +385,14 @@ func (m model) renderPomoTimelinePanel(w, innerLines int) string {
 	maxRows := m.pomoTimelineMaxRows(innerLines)
 	grid := expandPomoGrid(compactGrid, m.pomoTimelineGapLines(innerLines))
 	gridCursor := m.pomoTimelineGridCursor(grid)
-	win := computeScrollWindow(gridCursor, len(grid), maxRows)
-	gridBudget := maxRows
-	if hint := m.scrollHint(win); hint != "" {
-		lines = append(lines, truncateInner(hint, contentW))
-		gridBudget--
+	win := scrollWindow{}
+	if m.pomoFollowNow && showNow {
+		win = computeScrollWindow(gridCursor, len(grid), maxRows)
+	} else {
+		win = computeViewportWindow(m.pomoViewport, gridCursor, len(grid), maxRows)
 	}
+	lines = append(lines, truncateInner(m.scrollHint(win), contentW))
+	gridBudget := maxRows
 	var gridLines []string
 	tailBusy := false
 	for i := win.Start; i < win.End; i++ {
@@ -397,7 +400,7 @@ func (m model) renderPomoTimelinePanel(w, innerLines int) string {
 		if row.kind == "slot" || row.kind == "gap" {
 			tailBusy = row.slotBusy
 		}
-		selected := i == m.pomoGridCursor
+		selected := i == gridCursor
 		gridLines = append(gridLines, renderDayGridRow(row, anchor, selected, contentW, taskColors, live, layout))
 	}
 	if m.pomoTimelineDensity() == PomoDensityStretch {
@@ -407,7 +410,7 @@ func (m model) renderPomoTimelinePanel(w, innerLines int) string {
 	}
 	lines = append(lines, gridLines...)
 
-	if h := m.keyHint("[/] day · t today · z density · T switch · j/k scroll · e rename · n add · x delete"); h != "" {
+	if h := m.keyHint("[/] day · t now · z density · j/k line · J/K session · T switch · e rename · n add · x delete"); h != "" {
 		lines = append(lines, truncateInner(h, contentW))
 	}
 	return fitLines(strings.Join(padTimelinePanelLines(lines, w, contentW), "\n"), innerLines)

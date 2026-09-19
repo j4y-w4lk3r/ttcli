@@ -26,7 +26,7 @@ func TestCalDayKeyJumpsToToday(t *testing.T) {
 	}
 }
 
-func TestCalDayTimelinePlacesDateOnlyOnRail(t *testing.T) {
+func TestCalDayTimelinePinsDateOnlyAboveRail(t *testing.T) {
 	day := time.Date(2026, 8, 30, 0, 0, 0, 0, time.Local)
 	idx := buildCalIndex([]ticktick.Task{
 		{Title: "anytime", DueDate: "2026-08-30", IsAllDay: true},
@@ -34,20 +34,18 @@ func TestCalDayTimelinePlacesDateOnlyOnRail(t *testing.T) {
 	})
 	m := model{calDate: day}
 	rows, _ := m.calDayRows(idx)
-	var allDayHour string
+	allDayIndex := -1
+	firstSlotIndex := -1
 	for i, r := range rows {
-		if r.kind == "allday" {
-			for j := i - 1; j >= 0; j-- {
-				if rows[j].kind == "slot" {
-					allDayHour = rows[j].hourLabel
-					break
-				}
-			}
-			break
+		if r.kind == "allday" && allDayIndex < 0 {
+			allDayIndex = i
+		}
+		if r.kind == "slot" && firstSlotIndex < 0 {
+			firstSlotIndex = i
 		}
 	}
-	if allDayHour != "08:00" {
-		t.Fatalf("date-only task rail=%q want 08:00", allDayHour)
+	if allDayIndex < 0 || firstSlotIndex < 0 || allDayIndex >= firstSlotIndex {
+		t.Fatalf("all-day index=%d slot index=%d", allDayIndex, firstSlotIndex)
 	}
 }
 

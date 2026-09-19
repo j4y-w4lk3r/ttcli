@@ -11,7 +11,7 @@ import (
 
 func TestDueInlineShowsTime(t *testing.T) {
 	plain := stripANSI(dueInlineTask(ticktick.Task{
-		DueDate: "2026-03-08T14:30:00.000+0200",
+		DueDate: "2026-03-08T14:30:00.000+0100",
 	}))
 	if !strings.Contains(plain, "08/03/2026") || !strings.Contains(plain, "14:30") {
 		t.Fatalf("got %q", plain)
@@ -22,6 +22,21 @@ func TestDueInlineShowsTime(t *testing.T) {
 	}))
 	if strings.Contains(allDay, "14:") {
 		t.Fatalf("all-day should not show time: %q", allDay)
+	}
+}
+
+func TestDueClockDisplaysLocalTimeInsteadOfRawUTC(t *testing.T) {
+	oldLocal := time.Local
+	local, _ := time.LoadLocation("Europe/Warsaw")
+	time.Local = local
+	t.Cleanup(func() { time.Local = oldLocal })
+
+	task := ticktick.Task{DueDate: "2026-09-18T12:00:00.000+0000"}
+	if got := dueTaskClock(task); got != "14:00" {
+		t.Fatalf("clock=%q want 14:00", got)
+	}
+	if got := stripANSI(dueInlineTask(task)); !strings.Contains(got, "14:00") {
+		t.Fatalf("due display=%q", got)
 	}
 }
 

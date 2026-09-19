@@ -85,8 +85,9 @@ func taskDetailPanelOpts(t ticktick.Task, focusFn func(ticktick.Task) (ticktick.
 	var body []string
 
 	var meta []string
-	if s, ok := focusFn(t); ok {
-		meta = append(meta, renderTaskFocusDetail(s))
+	s, _ := focusFn(t)
+	if focusDetail := renderTaskFocusProgressDetail(t, s); focusDetail != "" {
+		meta = append(meta, focusDetail)
 	}
 	if p := t.PriorityLabel(); p != "-" {
 		meta = append(meta, "priority "+p)
@@ -218,4 +219,10 @@ func stripTaskHTML(s string) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func taskNotesToHTML(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	return strings.ReplaceAll(strings.TrimSpace(s), "\n", "<br/>")
 }

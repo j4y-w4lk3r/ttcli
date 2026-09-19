@@ -176,14 +176,14 @@ func (m model) dismissFocusAlert() (model, tea.Cmd) {
 	m.showFocusAlert = false
 	m.focusAlertDismissed = true
 	m.focusAlertChord = false
-	return m, tea.Batch(focusFinalizeDismissCmd(m.client), focusDismissNotifyCmd(), loadPomoCmd(m.client, m.pomoViewDate))
+	return m, tea.Batch(focusFinalizeDismissCmd(m.client), focusDismissNotifyCmd(), loadPomoCmd(m.repo, m.pomoViewDate, false))
 }
 
 func (m model) repeatFocusSession() (model, tea.Cmd) {
 	m.showFocusAlert = false
 	m.focusAlertDismissed = true
 	m.focusAlertChord = false
-	return m, tea.Batch(focusRepeatCmd(m.client), focusDismissNotifyCmd(), loadPomoCmd(m.client, m.pomoViewDate))
+	return m, tea.Batch(focusRepeatCmd(m.client), focusDismissNotifyCmd(), loadPomoCmd(m.repo, m.pomoViewDate, false))
 }
 
 func (m model) syncFocusSession(sess *focus.Session) model {

@@ -59,10 +59,11 @@ func (m model) pomoNavDay(delta int) (model, tea.Cmd) {
 	m.loading = true
 	m.pomoCursor = 0
 	m.pomoGridCursor = 0
+	m.pomoViewport = 0
 	m.pomoScrollToNow = m.pomoViewIsToday()
 	m.pomoFollowNow = m.pomoViewIsToday()
 	m.toast = fmt.Sprintf("timeline · %s", next.Format("Mon 2 Jan"))
-	return m, loadPomoCmd(m.client, next)
+	return m, loadPomoCmd(m.repo, next, false)
 }
 
 func (m model) pomoJumpToday() (model, tea.Cmd) {
@@ -76,10 +77,11 @@ func (m model) pomoJumpToday() (model, tea.Cmd) {
 	m.loading = true
 	m.pomoCursor = 0
 	m.pomoGridCursor = 0
+	m.pomoViewport = 0
 	m.pomoScrollToNow = true
 	m.pomoFollowNow = true
 	m.toast = "timeline · today"
-	return m, loadPomoCmd(m.client, today)
+	return m, loadPomoCmd(m.repo, today, false)
 }
 
 func (m *model) centerPomoTimelineOnNow() {
@@ -89,11 +91,10 @@ func (m *model) centerPomoTimelineOnNow() {
 	grid := m.pomoDayGrid()
 	if idx := gridRowForNow(grid); idx >= 0 {
 		m.pomoGridCursor = idx
-		if snap := nearestSelectablePomoGridRow(grid, idx, -1); snap >= 0 {
-			m.pomoGridCursor = snap
-		}
 		m.syncPomoCursorFromGrid(grid)
 		m.pomoFollowNow = true
+		maxRows := m.pomoTimelineMaxRows(m.layout().innerLines)
+		m.pomoViewport = max(idx-maxRows/2, 0)
 	}
 }
 
@@ -108,4 +109,22 @@ func (m model) pomoTimelineGridCursor(grid []dayGridRow) int {
 		cursor = gridRowForRecord(grid, m.pomoCursor)
 	}
 	return cursor
+}
+
+func (m *model) followPomoViewport(grid []dayGridRow) {
+	if len(grid) == 0 {
+		m.pomoViewport = 0
+		return
+	}
+	maxRows := m.pomoTimelineMaxRows(m.layout().innerLines)
+	window := computeViewportWindow(m.pomoViewport, m.pomoGridCursor, len(grid), maxRows)
+	m.pomoViewport = window.Start
+}
+
+func (m model) pomoVisibleAnchorHour(grid []dayGridRow) int {
+	if len(grid) == 0 {
+		return m.pomoTimelineAnchor().Hour()
+	}
+	index := clamp(m.pomoViewport, 0, len(grid)-1)
+	return grid[index].hour
 }

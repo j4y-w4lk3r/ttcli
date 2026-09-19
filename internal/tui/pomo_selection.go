@@ -5,9 +5,7 @@ import (
 )
 
 var pomoTimelineSelStyle = lipgloss.NewStyle().
-	Bold(true).
-	Foreground(colorBase).
-	Background(colorOverlay)
+	Bold(true)
 
 func isSelectablePomoGridRow(row dayGridRow) bool {
 	switch row.kind {
@@ -73,13 +71,9 @@ func nextPomoGridRow(grid []dayGridRow, cursor, delta int) int {
 	return cursor
 }
 
-// nextPomoGridCursor moves the timeline cursor: session-to-session when logged,
-// otherwise one row at a time for smooth hour scrolling on empty days.
+// nextPomoGridCursor always moves one visual row for smooth timeline scrolling.
 func nextPomoGridCursor(grid []dayGridRow, cursor, delta int) int {
-	if !pomoGridHasSessions(grid) {
-		return nextPomoGridRow(grid, cursor, delta)
-	}
-	return nextSelectablePomoGridRow(grid, cursor, delta)
+	return nextPomoGridRow(grid, cursor, delta)
 }
 
 func nextSelectablePomoGridRow(grid []dayGridRow, cursor, delta int) int {
@@ -121,7 +115,7 @@ func pomoTimelineSelectionPrefix(selected bool) string {
 	if !selected {
 		return "  "
 	}
-	return pomoRailStyle.Render("▸ ")
+	return taskSelStyle.Render("● ")
 }
 
 func highlightPomoTimelineRow(line string, selected bool) string {

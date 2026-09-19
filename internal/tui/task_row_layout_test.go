@@ -119,7 +119,10 @@ func TestFormatTaskLineShortTitlesStayCompact(t *testing.T) {
 		t.Fatalf("suffix col too far for short titles: %d", layout.SuffixCol)
 	}
 	line := m.formatTaskLine(rows[0].Task, 0, false, false, w, layout)
-	if dueColStart(line) > 30 {
+	if !strings.Contains(stripANSI(line), "0/1") {
+		t.Fatalf("task estimate missing from row: %q", stripANSI(line))
+	}
+	if dueColStart(line) > 60 {
 		t.Fatalf("due too far right on compact list: col=%d line=%q", dueColStart(line), stripANSI(line))
 	}
 }

@@ -10,7 +10,8 @@ import (
 
 // TaskSchedule describes due date, reminder, and duration for a task.
 type TaskSchedule struct {
-	Due            time.Time
+	Start          time.Time
+	Due            time.Time // legacy alias; Start takes precedence
 	HasDue         bool
 	AllDay         bool
 	ReminderBefore time.Duration // 0 = at due time
@@ -18,11 +19,19 @@ type TaskSchedule struct {
 	Duration       time.Duration
 }
 
+type TaskFocusPlan struct {
+	Minutes int
+	Pomos   int
+	Clear   bool
+}
+
 // TaskCreateInput is used when creating a task with optional schedule metadata.
 type TaskCreateInput struct {
 	Title, Content, ProjectID string
 	Priority                  int
 	Schedule                  *TaskSchedule
+	Recurrence                *TaskRecurrence
+	FocusPlan                 *TaskFocusPlan
 }
 
 // CreateTask adds a task and optionally applies due date / reminder / duration.
@@ -31,23 +40,37 @@ func (c *Client) CreateTask(in TaskCreateInput) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if in.Schedule == nil || !in.Schedule.HasDue {
+	if (in.Schedule == nil || !in.Schedule.HasDue) && in.Recurrence == nil && in.FocusPlan == nil {
 		return id, nil
 	}
 	task, err := c.FindTaskByID(id)
 	if err != nil {
 		return id, err
 	}
-	return id, c.ApplyTaskSchedule(task, *in.Schedule)
+	if in.Schedule != nil && in.Schedule.HasDue {
+		if err := applyScheduleToMap(task, *in.Schedule); err != nil {
+			return id, err
+		}
+	}
+	if err := applyRecurrenceToMap(task, in.Recurrence, false); err != nil {
+		return id, err
+	}
+	if err := applyFocusPlanToMap(task, in.FocusPlan); err != nil {
+		return id, err
+	}
+	return id, c.patchTaskMap(task)
 }
 
 // TaskUpdateInput updates an existing task's fields and optional schedule.
 type TaskUpdateInput struct {
-	Title    string
-	Content  string
-	Priority int
-	Schedule *TaskSchedule
-	ClearDue bool
+	Title           string
+	Content         string
+	Priority        int
+	Schedule        *TaskSchedule
+	ClearDue        bool
+	Recurrence      *TaskRecurrence
+	ClearRecurrence bool
+	FocusPlan       *TaskFocusPlan
 }
 
 // UpdateTask updates task fields and due date / reminder / duration.
@@ -65,6 +88,12 @@ func (c *Client) UpdateTask(taskID, projectRef string, in TaskUpdateInput) error
 		if err := applyScheduleToMap(task, *in.Schedule); err != nil {
 			return err
 		}
+	}
+	if err := applyRecurrenceToMap(task, in.Recurrence, in.ClearRecurrence); err != nil {
+		return err
+	}
+	if err := applyFocusPlanToMap(task, in.FocusPlan); err != nil {
+		return err
 	}
 	return c.patchTaskMap(task)
 }
@@ -88,19 +117,27 @@ func applyScheduleToMap(task map[string]any, sched TaskSchedule) error {
 	if id == "" {
 		return fmt.Errorf("task has no id")
 	}
-	tz, _ := task["timeZone"].(string)
-	if tz == "" {
-		tz = localTZ()
-	}
+	// Form and CLI schedule inputs are local wall-clock values. Reusing a
+	// task's old timezone and calling Time.In would shift an entered 14:00 to
+	// 12:00 when that task happened to carry UTC metadata.
+	tz := localTZ()
 	loc, err := time.LoadLocation(tz)
 	if err != nil {
 		loc = time.Local
 	}
 
-	due := sched.Due.In(loc)
-	start := due
+	startValue := sched.Start
+	if startValue.IsZero() {
+		startValue = sched.Due
+	}
+	start := time.Date(
+		startValue.Year(), startValue.Month(), startValue.Day(),
+		startValue.Hour(), startValue.Minute(), startValue.Second(),
+		startValue.Nanosecond(), loc,
+	)
+	due := start
 	if sched.AllDay {
-		dateStr := due.Format("2006-01-02")
+		dateStr := start.Format("2006-01-02")
 		task["isAllDay"] = true
 		task["isFloating"] = false
 		task["timeZone"] = tz
@@ -109,7 +146,7 @@ func applyScheduleToMap(task map[string]any, sched TaskSchedule) error {
 	} else {
 		task["isAllDay"] = false
 		if sched.Duration > 0 {
-			start = due.Add(-sched.Duration)
+			due = start.Add(sched.Duration)
 		}
 		task["isFloating"] = false
 		task["timeZone"] = tz
@@ -125,6 +162,65 @@ func applyScheduleToMap(task map[string]any, sched TaskSchedule) error {
 		task["reminder"] = ""
 		task["reminders"] = []any{}
 	}
+	return nil
+}
+
+func applyRecurrenceToMap(task map[string]any, recurrence *TaskRecurrence, clear bool) error {
+	if clear {
+		task["repeatFlag"] = ""
+		task["repeatFirstDate"] = ""
+		return nil
+	}
+	if recurrence == nil {
+		return nil
+	}
+	normalized, err := NormalizeRecurrenceRule(recurrence.Rule)
+	if err != nil {
+		return err
+	}
+	if normalized == "" {
+		return fmt.Errorf("repeat rule is empty")
+	}
+	if recurrence.RepeatFrom != RepeatFromDue && recurrence.RepeatFrom != RepeatFromCompletion {
+		return fmt.Errorf("invalid repeat basis %d", recurrence.RepeatFrom)
+	}
+	task["repeatFlag"] = normalized
+	task["repeatFrom"] = recurrence.RepeatFrom
+	return nil
+}
+
+func applyFocusPlanToMap(task map[string]any, plan *TaskFocusPlan) error {
+	if plan == nil {
+		return nil
+	}
+	minutes, pomos := plan.Minutes, plan.Pomos
+	if plan.Clear {
+		minutes, pomos = 0, 0
+	}
+	if minutes < 0 {
+		return fmt.Errorf("planned focus minutes cannot be negative")
+	}
+	if pomos < 0 || pomos > 60 {
+		return fmt.Errorf("planned pomos must be between 0 and 60")
+	}
+	if minutes > 0 && pomos == 0 {
+		pomos = (minutes + StandardPomoMinutes - 1) / StandardPomoMinutes
+		if pomos > 60 {
+			pomos = 60
+		}
+	}
+
+	summary := map[string]any{}
+	if raw, ok := task["focusSummaries"].([]any); ok && len(raw) > 0 {
+		if existing, ok := raw[0].(map[string]any); ok {
+			for key, value := range existing {
+				summary[key] = value
+			}
+		}
+	}
+	summary["estimatedDuration"] = minutes * 60
+	summary["estimatedPomo"] = pomos
+	task["focusSummaries"] = []any{summary}
 	return nil
 }
 

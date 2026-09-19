@@ -239,19 +239,25 @@ func renderHourNowRow(timeLabel string, width int, selected bool) string {
 
 func renderHourPomoRow(index, total int, selected bool, title string, taskColor lipgloss.Color, startClock, endClock string, mins int, width int, layout pomoTimelineLayout) string {
 	timeCol := hintStyle.Render(strings.Repeat(" ", dayTimeColW))
+	if selected {
+		timeCol = pomoTimelineSelectionPrefix(true) + hintStyle.Render(strings.Repeat(" ", dayTimeColW-2))
+	}
 	gap := dayTimelineGap()
 	contentW := dayTimelineContentW(width)
 	body, suffix := hourPomoRowParts(title, taskColor, startClock, endClock, mins, selected)
-	line := alignPomoRowColumns(pomoTimelineSelectionPrefix(selected)+body, suffix, contentW, layout)
+	line := alignPomoRowColumns(body, suffix, contentW, layout)
 	return truncateInner(highlightPomoTimelineRow(timeCol+gap+line, selected), width)
 }
 
 func renderHourPauseRow(spell focus.PauseSpell, selected bool, width int, layout pomoTimelineLayout, now time.Time) string {
 	timeCol := hintStyle.Render(strings.Repeat(" ", dayTimeColW))
+	if selected {
+		timeCol = pomoTimelineSelectionPrefix(true) + hintStyle.Render(strings.Repeat(" ", dayTimeColW-2))
+	}
 	gap := dayTimelineGap()
 	contentW := dayTimelineContentW(width)
 	body, suffix := hourPauseRowParts(spell, selected, now)
-	line := alignPomoRowColumns(pomoTimelineSelectionPrefix(selected)+body, suffix, contentW, layout)
+	line := alignPomoRowColumns(body, suffix, contentW, layout)
 	return truncateInner(highlightPomoTimelineRow(timeCol+gap+line, selected), width)
 }
 
@@ -261,8 +267,11 @@ func renderHourLiveRow(sess *focus.Session, taskColor lipgloss.Color, width int,
 	}
 	body, suffix := hourLiveRowParts(sess, taskColor)
 	timeCol := hintStyle.Render(strings.Repeat(" ", dayTimeColW))
+	if selected {
+		timeCol = pomoTimelineSelectionPrefix(true) + hintStyle.Render(strings.Repeat(" ", dayTimeColW-2))
+	}
 	gap := dayTimelineGap()
 	contentW := dayTimelineContentW(width)
-	line := alignPomoRowColumns(pomoTimelineSelectionPrefix(selected)+body, suffix, contentW, layout)
+	line := alignPomoRowColumns(body, suffix, contentW, layout)
 	return truncateInner(highlightPomoTimelineRow(timeCol+gap+line, selected), width)
 }

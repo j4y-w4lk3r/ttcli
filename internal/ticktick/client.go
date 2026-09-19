@@ -601,13 +601,80 @@ func canonicalID(rb []byte, fallback string) (string, error) {
 
 // DeleteTask permanently removes a task.
 func (c *Client) DeleteTask(projectID, taskID string) error {
+	return c.DeleteTasks(projectID, []string{taskID})
+}
+
+// TaskSnapshot returns the full private-API task object for archival.
+func (c *Client) TaskSnapshot(projectID, taskID string) (json.RawMessage, error) {
+	pid, err := c.ResolveProject(projectID)
+	if err != nil {
+		return nil, err
+	}
+	task, err := c.findProjectTask(pid, taskID)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(task)
+	if err != nil {
+		return nil, fmt.Errorf("encode task snapshot: %w", err)
+	}
+	return raw, nil
+}
+
+// TrashTasks soft-deletes tasks while keeping them recoverable in TickTick.
+func (c *Client) TrashTasks(projectID string, taskIDs []string) error {
+	if len(taskIDs) == 0 {
+		return nil
+	}
 	pid, err := c.ResolveProject(projectID)
 	if err != nil {
 		return err
 	}
+	targets, err := c.findProjectTasks(pid, taskIDs)
+	if err != nil {
+		return err
+	}
+	for _, target := range targets {
+		target["deleted"] = 1
+	}
+	return c.patchTasks(targets)
+}
+
+// RestoreTasks moves trashed tasks back to their previous open/done state.
+func (c *Client) RestoreTasks(projectID string, taskIDs []string) error {
+	if len(taskIDs) == 0 {
+		return nil
+	}
+	pid, err := c.ResolveProject(projectID)
+	if err != nil {
+		return err
+	}
+	targets, err := c.findProjectTasks(pid, taskIDs)
+	if err != nil {
+		return err
+	}
+	for _, target := range targets {
+		target["deleted"] = 0
+	}
+	return c.patchTasks(targets)
+}
+
+// DeleteTasks permanently removes tasks from one project in one batch.
+func (c *Client) DeleteTasks(projectID string, taskIDs []string) error {
+	if len(taskIDs) == 0 {
+		return nil
+	}
+	pid, err := c.ResolveProject(projectID)
+	if err != nil {
+		return err
+	}
+	deletes := make([]any, 0, len(taskIDs))
+	for _, taskID := range taskIDs {
+		deletes = append(deletes, map[string]string{"taskId": taskID, "projectId": pid})
+	}
 	payload := map[string]any{
 		"add": []any{}, "update": []any{},
-		"delete":         []any{map[string]string{"taskId": taskID, "projectId": pid}},
+		"delete":         deletes,
 		"addAttachments": []any{}, "updateAttachments": []any{}, "deleteAttachments": []any{},
 	}
 	b, _ := json.Marshal(payload)
@@ -615,9 +682,67 @@ func (c *Client) DeleteTask(projectID, taskID string) error {
 	return err
 }
 
+// RecreateTaskSnapshot creates a new live task from an archived raw snapshot.
+func (c *Client) RecreateTaskSnapshot(raw json.RawMessage, fallbackProjectID string) (string, error) {
+	var task map[string]any
+	if err := json.Unmarshal(raw, &task); err != nil {
+		return "", fmt.Errorf("decode archived task: %w", err)
+	}
+	projectID, _ := task["projectId"].(string)
+	if projectID == "" {
+		projectID = fallbackProjectID
+	}
+	pid, err := c.ResolveProject(projectID)
+	if err != nil {
+		return "", err
+	}
+	id := generateID()
+	now := time.Now().UTC().Format(ticktickTimeLayout)
+	task["id"] = id
+	task["projectId"] = pid
+	task["status"] = 0
+	task["progress"] = 0
+	task["deleted"] = 0
+	task["createdTime"] = now
+	task["modifiedTime"] = now
+	task["sortOrder"] = -time.Now().UnixMicro()
+	delete(task, "etag")
+	delete(task, "completedTime")
+	delete(task, "completedUserId")
+	delete(task, "repeatTaskId")
+	delete(task, "repeatFirstDate")
+	delete(task, "exDate")
+	delete(task, "parentId")
+	delete(task, "childIds")
+	if items, ok := task["items"].([]any); ok {
+		for _, value := range items {
+			if item, ok := value.(map[string]any); ok {
+				item["id"] = generateID()
+			}
+		}
+	}
+	payload := map[string]any{
+		"add": []any{task}, "update": []any{}, "delete": []any{},
+		"addAttachments": []any{}, "updateAttachments": []any{}, "deleteAttachments": []any{},
+	}
+	body, _ := json.Marshal(payload)
+	response, err := c.do(http.MethodPost, "/api/v2/batch/task", body)
+	if err != nil {
+		return "", err
+	}
+	return canonicalID(response, id)
+}
+
 // CompleteTask marks a task done by patching its raw JSON status to 2 and
 // sending it back in the update batch (preserving all other fields).
 func (c *Client) CompleteTask(projectID, taskID string) error {
+	return c.CompleteTasks(projectID, []string{taskID})
+}
+
+// CompleteTaskOccurrence completes the current occurrence of a recurring
+// task. TickTick advances the series server-side; the raw task map is patched
+// so undocumented recurrence fields are preserved.
+func (c *Client) CompleteTaskOccurrence(projectID, taskID string) error {
 	pid, err := c.ResolveProject(projectID)
 	if err != nil {
 		return err
@@ -625,28 +750,71 @@ func (c *Client) CompleteTask(projectID, taskID string) error {
 	target, err := c.findProjectTask(pid, taskID)
 	if err != nil {
 		return err
+	}
+	repeatFlag, _ := target["repeatFlag"].(string)
+	if strings.TrimSpace(repeatFlag) == "" {
+		return fmt.Errorf("task %s is not recurring", taskID)
 	}
 	target["status"] = 2
 	target["completedTime"] = time.Now().UTC().Format(ticktickTimeLayout)
 	return c.patchTask(pid, target)
 }
 
-// ReopenTask marks a completed task as open again.
-func (c *Client) ReopenTask(projectID, taskID string) error {
+// CompleteTasks marks tasks done with one project fetch and one update batch.
+func (c *Client) CompleteTasks(projectID string, taskIDs []string) error {
+	if len(taskIDs) == 0 {
+		return nil
+	}
 	pid, err := c.ResolveProject(projectID)
 	if err != nil {
 		return err
 	}
-	target, err := c.findProjectTask(pid, taskID)
+	targets, err := c.findProjectTasks(pid, taskIDs)
 	if err != nil {
 		return err
 	}
-	target["status"] = 0
-	target["completedTime"] = ""
-	return c.patchTask(pid, target)
+	completedAt := time.Now().UTC().Format(ticktickTimeLayout)
+	for _, target := range targets {
+		target["status"] = 2
+		target["completedTime"] = completedAt
+	}
+	return c.patchTasks(targets)
+}
+
+// ReopenTask marks a completed task as open again.
+func (c *Client) ReopenTask(projectID, taskID string) error {
+	return c.ReopenTasks(projectID, []string{taskID})
+}
+
+// ReopenTasks marks completed tasks open with one project fetch and one batch.
+func (c *Client) ReopenTasks(projectID string, taskIDs []string) error {
+	if len(taskIDs) == 0 {
+		return nil
+	}
+	pid, err := c.ResolveProject(projectID)
+	if err != nil {
+		return err
+	}
+	targets, err := c.findProjectTasks(pid, taskIDs)
+	if err != nil {
+		return err
+	}
+	for _, target := range targets {
+		target["status"] = 0
+		target["completedTime"] = ""
+	}
+	return c.patchTasks(targets)
 }
 
 func (c *Client) findProjectTask(projectID, taskID string) (map[string]any, error) {
+	targets, err := c.findProjectTasks(projectID, []string{taskID})
+	if err != nil {
+		return nil, err
+	}
+	return targets[0], nil
+}
+
+func (c *Client) findProjectTasks(projectID string, taskIDs []string) ([]map[string]any, error) {
 	raw, err := c.GetRaw("/api/v2/project/" + projectID + "/tasks")
 	if err != nil {
 		return nil, err
@@ -661,17 +829,34 @@ func (c *Client) findProjectTask(projectID, taskID string) (map[string]any, erro
 		}
 		arr = obj.Tasks
 	}
-	for _, t := range arr {
-		if id, _ := t["id"].(string); id == taskID {
-			return t, nil
+	byID := make(map[string]map[string]any, len(arr))
+	for _, task := range arr {
+		if id, _ := task["id"].(string); id != "" {
+			byID[id] = task
 		}
 	}
-	return nil, fmt.Errorf("task %s not found in project %s", taskID, projectID)
+	targets := make([]map[string]any, 0, len(taskIDs))
+	for _, taskID := range taskIDs {
+		target, ok := byID[taskID]
+		if !ok {
+			return nil, fmt.Errorf("task %s not found in project %s", taskID, projectID)
+		}
+		targets = append(targets, target)
+	}
+	return targets, nil
 }
 
 func (c *Client) patchTask(projectID string, target map[string]any) error {
+	return c.patchTasks([]map[string]any{target})
+}
+
+func (c *Client) patchTasks(targets []map[string]any) error {
+	updates := make([]any, len(targets))
+	for i, target := range targets {
+		updates[i] = target
+	}
 	payload := map[string]any{
-		"add": []any{}, "update": []any{target}, "delete": []any{},
+		"add": []any{}, "update": updates, "delete": []any{},
 		"addAttachments": []any{}, "updateAttachments": []any{}, "deleteAttachments": []any{},
 	}
 	b, _ := json.Marshal(payload)

@@ -72,7 +72,32 @@ func taskRowVisible(t ticktick.Task, showCompleted, showDeleted bool, filter str
 	if filter == "" {
 		return true
 	}
-	return strings.Contains(strings.ToLower(t.Title), filter)
+	return taskMatchesFilter(t, filter)
+}
+
+func taskMatchesFilter(t ticktick.Task, filter string) bool {
+	filter = strings.ToLower(strings.TrimSpace(filter))
+	if filter == "" {
+		return true
+	}
+	haystack := strings.ToLower(strings.Join(
+		[]string{t.Title, t.Content, t.Desc, strings.Join(t.Tags, " ")},
+		"\n",
+	))
+	return strings.Contains(haystack, filter)
+}
+
+func taskMatchesScope(t ticktick.Task, scope TaskScope) bool {
+	switch normalizeTaskScope(scope) {
+	case TaskScopeDone:
+		return t.Done() && !t.Trashed()
+	case TaskScopeTrash:
+		return t.Trashed()
+	case TaskScopeAll:
+		return true
+	default:
+		return !t.Done() && !t.Trashed()
+	}
 }
 
 func subtreeHasVisibleRow(t ticktick.Task, tasks []ticktick.Task, showCompleted, showDeleted bool, filter string) bool {
@@ -137,6 +162,54 @@ func buildVisibleTaskRows(tasks []ticktick.Task, sortMode TaskSortMode, showComp
 	placed := make(map[string]bool, len(roots))
 	for _, root := range roots {
 		appendVisibleTaskTree(root, 0, tasks, showCompleted, showDeleted, filter, &out, placed)
+	}
+	return out
+}
+
+func appendTaskTreeForScope(
+	parent ticktick.Task,
+	depth int,
+	tasks []ticktick.Task,
+	scope TaskScope,
+	filter string,
+	out *[]taskListRow,
+	placed map[string]bool,
+) {
+	if placed[parent.ID] {
+		return
+	}
+	visible := taskMatchesScope(parent, scope) && taskMatchesFilter(parent, filter)
+	childDepth := depth
+	if visible {
+		placed[parent.ID] = true
+		*out = append(*out, taskListRow{Task: parent, Depth: depth})
+		childDepth++
+	}
+	for _, child := range orderedSubtasks(parent, tasks) {
+		appendTaskTreeForScope(child, childDepth, tasks, scope, filter, out, placed)
+	}
+}
+
+func buildVisibleTaskRowsForScope(tasks []ticktick.Task, sortMode TaskSortMode, scope TaskScope, filter string) []taskListRow {
+	seen := make(map[string]bool, len(tasks))
+	var roots []ticktick.Task
+	for _, task := range tasks {
+		if task.IsSubtask() || task.ID == "" || seen[task.ID] {
+			continue
+		}
+		seen[task.ID] = true
+		roots = append(roots, task)
+	}
+	sortTasksForProject(roots, sortMode)
+	var out []taskListRow
+	placed := make(map[string]bool, len(tasks))
+	for _, root := range roots {
+		appendTaskTreeForScope(root, 0, tasks, scope, filter, &out, placed)
+	}
+	for _, task := range tasks {
+		if !placed[task.ID] && taskMatchesScope(task, scope) && taskMatchesFilter(task, filter) {
+			out = append(out, taskListRow{Task: task})
+		}
 	}
 	return out
 }

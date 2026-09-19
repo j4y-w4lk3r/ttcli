@@ -4,7 +4,73 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+
+	"github.com/j4y-w4lk3r/ttcli/internal/planning"
 )
+
+type TaskScope string
+
+const (
+	TaskScopeOpen    TaskScope = "open"
+	TaskScopeDone    TaskScope = "done"
+	TaskScopeTrash   TaskScope = "trash"
+	TaskScopeAll     TaskScope = "all"
+	TaskScopeArchive TaskScope = "archive"
+)
+
+func normalizeTaskScope(scope TaskScope) TaskScope {
+	switch scope {
+	case TaskScopeOpen, TaskScopeDone, TaskScopeTrash, TaskScopeAll, TaskScopeArchive:
+		return scope
+	default:
+		return TaskScopeOpen
+	}
+}
+
+func (s TaskScope) Label() string {
+	switch normalizeTaskScope(s) {
+	case TaskScopeDone:
+		return "Done"
+	case TaskScopeTrash:
+		return "Trash"
+	case TaskScopeAll:
+		return "All"
+	case TaskScopeArchive:
+		return "Archive"
+	default:
+		return "Open"
+	}
+}
+
+func (s TaskScope) Next() TaskScope {
+	switch normalizeTaskScope(s) {
+	case TaskScopeOpen:
+		return TaskScopeDone
+	case TaskScopeDone:
+		return TaskScopeTrash
+	case TaskScopeTrash:
+		return TaskScopeAll
+	case TaskScopeAll:
+		return TaskScopeArchive
+	default:
+		return TaskScopeOpen
+	}
+}
+
+func (s TaskScope) Prev() TaskScope {
+	switch normalizeTaskScope(s) {
+	case TaskScopeOpen:
+		return TaskScopeArchive
+	case TaskScopeDone:
+		return TaskScopeOpen
+	case TaskScopeTrash:
+		return TaskScopeDone
+	case TaskScopeAll:
+		return TaskScopeTrash
+	default:
+		return TaskScopeAll
+	}
+}
 
 // TaskSortMode controls how tasks are ordered within a list.
 type TaskSortMode string
@@ -70,6 +136,45 @@ func (d PomoTimelineDensity) Toggle() PomoTimelineDensity {
 	return PomoDensityCompact
 }
 
+type PomoFocusDesign string
+
+const (
+	PomoFocusArc  PomoFocusDesign = "arc"
+	PomoFocusBar  PomoFocusDesign = "bar"
+	PomoFocusCard PomoFocusDesign = "card"
+)
+
+func (d PomoFocusDesign) Label() string {
+	switch d {
+	case PomoFocusBar:
+		return "focus bar"
+	case PomoFocusCard:
+		return "status card"
+	default:
+		return "segmented arc"
+	}
+}
+
+func (d PomoFocusDesign) Next() PomoFocusDesign {
+	switch d {
+	case PomoFocusArc:
+		return PomoFocusBar
+	case PomoFocusBar:
+		return PomoFocusCard
+	default:
+		return PomoFocusArc
+	}
+}
+
+func normalizePomoFocusDesign(design PomoFocusDesign) PomoFocusDesign {
+	switch design {
+	case PomoFocusArc, PomoFocusBar, PomoFocusCard:
+		return design
+	default:
+		return PomoFocusArc
+	}
+}
+
 type TaskDetailLayout string
 
 const (
@@ -125,11 +230,89 @@ func parseAppView(s string) appView {
 }
 
 type uiSettings struct {
-	TaskSortDefault     TaskSortMode            `json:"taskSortDefault,omitempty"`
-	TaskSortByProject   map[string]TaskSortMode `json:"taskSortByProject,omitempty"`
-	PomoTimelineDensity PomoTimelineDensity     `json:"pomoTimelineDensity,omitempty"`
-	TaskDetailLayout    TaskDetailLayout        `json:"taskDetailLayout,omitempty"`
-	LastView            string                  `json:"lastView,omitempty"`
+	TaskSortDefault        TaskSortMode            `json:"taskSortDefault,omitempty"`
+	TaskSortByProject      map[string]TaskSortMode `json:"taskSortByProject,omitempty"`
+	TaskScope              TaskScope               `json:"taskScope,omitempty"`
+	PomoTimelineDensity    PomoTimelineDensity     `json:"pomoTimelineDensity,omitempty"`
+	CalendarWeekDensity    PomoTimelineDensity     `json:"calendarWeekDensity,omitempty"`
+	PomoFocusDesign        PomoFocusDesign         `json:"pomoFocusDesign,omitempty"`
+	PomoDailyGoal          int                     `json:"pomoDailyGoal,omitempty"`
+	TaskDetailLayout       TaskDetailLayout        `json:"taskDetailLayout,omitempty"`
+	LastView               string                  `json:"lastView,omitempty"`
+	WorkStart              string                  `json:"workStart,omitempty"`
+	WorkEnd                string                  `json:"workEnd,omitempty"`
+	PlanningBufferMinutes  int                     `json:"planningBufferMinutes,omitempty"`
+	DefaultTaskMinutes     int                     `json:"defaultTaskMinutes,omitempty"`
+	WeekStartsOn           string                  `json:"weekStartsOn,omitempty"`
+	CalendarDayShowOverdue bool                    `json:"calendarDayShowOverdue,omitempty"`
+}
+
+func (s *uiSettings) applyPlanningDefaults() {
+	s.TaskScope = normalizeTaskScope(s.TaskScope)
+	if _, err := planning.ParseClockMinutes(s.WorkStart); err != nil {
+		s.WorkStart = "09:00"
+	}
+	if _, err := planning.ParseClockMinutes(s.WorkEnd); err != nil {
+		s.WorkEnd = "18:00"
+	}
+	start, _ := planning.ParseClockMinutes(s.WorkStart)
+	end, _ := planning.ParseClockMinutes(s.WorkEnd)
+	if end <= start {
+		s.WorkStart = "09:00"
+		s.WorkEnd = "18:00"
+	}
+	if s.PlanningBufferMinutes < 0 || s.PlanningBufferMinutes > 12*60 {
+		s.PlanningBufferMinutes = planning.DefaultBufferMinutes
+	}
+	if s.DefaultTaskMinutes < 1 || s.DefaultTaskMinutes > 24*60 {
+		s.DefaultTaskMinutes = planning.DefaultTaskMinutes
+	}
+	s.WeekStartsOn = "monday"
+	if s.CalendarWeekDensity != PomoDensityCompact {
+		s.CalendarWeekDensity = PomoDensityStretch
+	}
+}
+
+func (s *uiSettings) applyPomoDefaults() {
+	s.PomoFocusDesign = normalizePomoFocusDesign(s.PomoFocusDesign)
+	if s.PomoDailyGoal < 1 || s.PomoDailyGoal > 999 {
+		s.PomoDailyGoal = dailyPomoGoal
+	}
+}
+
+func (s uiSettings) pomoDailyGoal() int {
+	if s.PomoDailyGoal < 1 {
+		return dailyPomoGoal
+	}
+	return s.PomoDailyGoal
+}
+
+func (s uiSettings) planningConfig() planning.Config {
+	start, err := planning.ParseClockMinutes(s.WorkStart)
+	if err != nil {
+		start = planning.DefaultWorkStartMinutes
+	}
+	end, err := planning.ParseClockMinutes(s.WorkEnd)
+	if err != nil {
+		end = planning.DefaultWorkEndMinutes
+	}
+	return planning.Config{
+		WorkStartMinutes: start,
+		WorkEndMinutes:   end,
+		BufferMinutes:    s.PlanningBufferMinutes,
+		DefaultMinutes:   s.DefaultTaskMinutes,
+	}.Normalized()
+}
+
+func (s uiSettings) weekStartsMonday() bool {
+	return true
+}
+
+func (s uiSettings) calendarWeekDensity() PomoTimelineDensity {
+	if s.CalendarWeekDensity == PomoDensityCompact {
+		return PomoDensityCompact
+	}
+	return PomoDensityStretch
 }
 
 func settingsPath() (string, error) {
@@ -140,19 +323,35 @@ func settingsPath() (string, error) {
 	return filepath.Join(home, ".config", "ttcli", "tui.json"), nil
 }
 
+func defaultUISettings() uiSettings {
+	return uiSettings{
+		WorkStart:             "09:00",
+		WorkEnd:               "18:00",
+		PlanningBufferMinutes: planning.DefaultBufferMinutes,
+		DefaultTaskMinutes:    planning.DefaultTaskMinutes,
+		WeekStartsOn:          "monday",
+		CalendarWeekDensity:   PomoDensityStretch,
+		PomoFocusDesign:       PomoFocusArc,
+		PomoDailyGoal:         dailyPomoGoal,
+		TaskScope:             TaskScopeOpen,
+	}
+}
+
 func loadUISettings() uiSettings {
+	s := defaultUISettings()
 	path, err := settingsPath()
 	if err != nil {
-		return uiSettings{}
+		return s
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return uiSettings{}
+		return s
 	}
-	var s uiSettings
 	if json.Unmarshal(b, &s) != nil {
-		return uiSettings{}
+		return defaultUISettings()
 	}
+	s.applyPlanningDefaults()
+	s.applyPomoDefaults()
 	return s
 }
 

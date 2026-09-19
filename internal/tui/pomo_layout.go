@@ -23,7 +23,6 @@ func computePomoTimelineLayout(grid []dayGridRow, contentW int, taskColors map[s
 		if body == "" || suffix == "" {
 			continue
 		}
-		body = pomoTimelineSelectionPrefix(false) + body
 		if w := lipgloss.Width(body); w > maxBodyW {
 			maxBodyW = w
 		}

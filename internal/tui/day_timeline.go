@@ -12,11 +12,11 @@ const (
 	dayEmptyRail = "╌"
 	daySlotRail  = "─"
 
-	pomoEndColW   = 10 // ──▶ 11:55
-	pomoBarColW   = 8 // ▮▯▯▯▯▯▯▯
-	pomoDurColW   = 4 // 2m … 60m
+	pomoEndColW      = 10 // ──▶ 11:55
+	pomoBarColW      = 8  // ▮▯▯▯▯▯▯▯
+	pomoDurColW      = 4  // 2m … 60m
 	pomoDurExtraColW = 11 // +1h08m … +60m
-	pomoColGap    = 2 // space between aligned columns
+	pomoColGap       = 2  // space between aligned columns
 )
 
 func dayTimelineGap() string { return "  " }
@@ -39,8 +39,9 @@ func dayRailWidth(totalW int) int {
 }
 
 type slotSummary struct {
-	sessions int
-	mins     int
+	sessions     int
+	mins         int
+	capacityMins int
 }
 
 func daySlotMarker(busy bool, totalW int, sum slotSummary) string {
@@ -48,7 +49,7 @@ func daySlotMarker(busy bool, totalW int, sum slotSummary) string {
 	summary := slotSummaryLabel(sum)
 	summaryW := 0
 	if summary != "" {
-		summaryW = lipgloss.Width(" "+hintStyle.Render(summary))
+		summaryW = lipgloss.Width(" " + hintStyle.Render(summary))
 	}
 	contentW := railW - summaryW
 	if contentW < 4 {
@@ -56,7 +57,11 @@ func daySlotMarker(busy bool, totalW int, sum slotSummary) string {
 	}
 	if busy {
 		if sum.sessions > 0 {
-			fillRatio := float64(sum.mins) / float64(dayHourStep*60)
+			capacityMins := sum.capacityMins
+			if capacityMins <= 0 {
+				capacityMins = dayHourStep * 60
+			}
+			fillRatio := float64(sum.mins) / float64(capacityMins)
 			if sum.mins <= 0 {
 				fillRatio = float64(sum.sessions) / 4.0
 			}
@@ -143,7 +148,9 @@ func fmtTimeCol(label string) string {
 func renderDayNowRow(nowLabel string, width int) string {
 	timeCol := pomoNowStyle.Render(fmtTimeCol(nowLabel))
 	gap := dayTimelineGap()
-	marker := pomoNowStyle.Render("● now")
+	contentW := dayTimelineContentW(width)
+	label := "● NOW "
+	marker := pomoNowStyle.Render(label + strings.Repeat("━", max(contentW-lipgloss.Width(label), 0)))
 	return truncateInner(timeCol+gap+marker, width)
 }
 

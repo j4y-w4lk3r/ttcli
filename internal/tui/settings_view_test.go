@@ -53,6 +53,45 @@ func TestTaskDetailSplitWidths(t *testing.T) {
 	}
 }
 
+func TestPlanningSettingsDefaultsAndValidation(t *testing.T) {
+	settings := defaultUISettings()
+	config := settings.planningConfig()
+	if config.WorkStartMinutes != 9*60 || config.WorkEndMinutes != 18*60 {
+		t.Fatalf("default work window=%d–%d", config.WorkStartMinutes, config.WorkEndMinutes)
+	}
+	if config.BufferMinutes != 30 || config.DefaultMinutes != 25 || !settings.weekStartsMonday() {
+		t.Fatalf("defaults=%+v config=%+v", settings, config)
+	}
+	if settings.PomoFocusDesign != PomoFocusArc {
+		t.Fatalf("pomo design=%q", settings.PomoFocusDesign)
+	}
+	if settings.PomoDailyGoal != dailyPomoGoal {
+		t.Fatalf("pomo goal=%d want %d", settings.PomoDailyGoal, dailyPomoGoal)
+	}
+	if settings.TaskScope != TaskScopeOpen || settings.calendarWeekDensity() != PomoDensityStretch {
+		t.Fatalf("scope/density defaults=%+v", settings)
+	}
+
+	settings.WorkStart = "bad"
+	settings.WorkEnd = "08:00"
+	settings.DefaultTaskMinutes = -1
+	settings.WeekStartsOn = "nonsense"
+	settings.TaskScope = "unknown"
+	settings.CalendarWeekDensity = "unknown"
+	settings.PomoFocusDesign = "unknown"
+	settings.PomoDailyGoal = 1000
+	settings.applyPlanningDefaults()
+	settings.applyPomoDefaults()
+	if settings.WorkStart != "09:00" || settings.WorkEnd != "18:00" ||
+		settings.DefaultTaskMinutes != 25 || !settings.weekStartsMonday() ||
+		settings.WeekStartsOn != "monday" || settings.TaskScope != TaskScopeOpen ||
+		settings.calendarWeekDensity() != PomoDensityStretch ||
+		settings.PomoFocusDesign != PomoFocusArc ||
+		settings.PomoDailyGoal != dailyPomoGoal {
+		t.Fatalf("validated settings=%+v", settings)
+	}
+}
+
 func TestCalDrillDownMonthToDay(t *testing.T) {
 	m := fixtureModel(120, 40)
 	m.view = viewCalendar

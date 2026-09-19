@@ -41,7 +41,7 @@ func expandPomoGrid(grid []dayGridRow, gapAfterSlot int) []dayGridRow {
 }
 
 func (m model) pomoTimelineMaxRows(innerLines int) int {
-	maxRows := innerLines - 2 // header + footer hint
+	maxRows := innerLines - 3 // header + stable scroll row + footer hint
 	if maxRows < 6 {
 		maxRows = 6
 	}

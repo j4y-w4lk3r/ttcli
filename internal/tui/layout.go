@@ -177,7 +177,30 @@ func clipInnerContent(s string, maxW int) string {
 	}
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
-		lines[i] = truncateRenderedWidth(line, maxW)
+		lines[i] = padToWidth(truncateRenderedWidth(line, maxW), maxW)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func padBlockToSize(s string, height, width int) string {
+	if height < 1 {
+		height = 1
+	}
+	if width < 1 {
+		width = 1
+	}
+	lines := strings.Split(strings.TrimSuffix(s, "\n"), "\n")
+	if s == "" {
+		lines = nil
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	for i, line := range lines {
+		lines[i] = padToWidth(truncateRenderedWidth(line, width), width)
 	}
 	return strings.Join(lines, "\n")
 }

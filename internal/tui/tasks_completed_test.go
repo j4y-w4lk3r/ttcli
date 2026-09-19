@@ -37,11 +37,11 @@ func TestToggleCompletedKey(t *testing.T) {
 		{ID: "2", Title: "done", Status: 2},
 	}
 	m = pressKey(m, "c")
-	if !m.showCompleted {
-		t.Fatal("expected showCompleted")
+	if m.effectiveTaskScope() != TaskScopeDone {
+		t.Fatalf("scope=%s want done", m.effectiveTaskScope())
 	}
-	if len(m.visibleTasks()) != 2 {
-		t.Fatal("expected both tasks visible")
+	if tasks := m.visibleTasks(); len(tasks) != 1 || tasks[0].ID != "2" {
+		t.Fatalf("expected only done task, got %+v", tasks)
 	}
 }
 
@@ -81,11 +81,11 @@ func TestToggleTrashedKey(t *testing.T) {
 		{ID: "1", Title: "open", Status: 0},
 		{ID: "2", Title: "trashed", Status: 0, Deleted: 2},
 	}
-	m = pressKey(m, "C")
-	if !m.showDeleted {
-		t.Fatal("expected showDeleted")
+	m = pressKey(pressKey(m, "c"), "c")
+	if m.effectiveTaskScope() != TaskScopeTrash {
+		t.Fatalf("scope=%s want trash", m.effectiveTaskScope())
 	}
-	if len(m.visibleTasks()) != 2 {
-		t.Fatal("expected both tasks visible")
+	if tasks := m.visibleTasks(); len(tasks) != 1 || tasks[0].ID != "2" {
+		t.Fatalf("expected only trashed task, got %+v", tasks)
 	}
 }

@@ -156,3 +156,14 @@ func TestStripTaskHTML(t *testing.T) {
 		t.Fatal("expected content")
 	}
 }
+
+func TestTaskNotesHTMLRoundTripPreservesNewlines(t *testing.T) {
+	plain := "first line\nsecond line"
+	encoded := taskNotesToHTML(plain)
+	if encoded != "first line<br/>second line" {
+		t.Fatalf("encoded=%q", encoded)
+	}
+	if decoded := stripTaskHTML(encoded); decoded != plain {
+		t.Fatalf("decoded=%q want %q", decoded, plain)
+	}
+}

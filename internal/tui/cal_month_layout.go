@@ -49,15 +49,15 @@ func computeCalMonthLayout(fullW, innerLines, overheadLines int) calMonthLayout 
 		WeekRows: calMonthWeekRows,
 		FullW:    fullW,
 	}
-	minOuter := calMonthBorderLines + 2 // day number + at least one task line
+	minOuter := calMonthBorderLines + 3 // day number + focus progress + at least one task line
 	if innerLines < overheadLines+minOuter+calMonthWeekRows {
-		lay.CellInnerH = 2
+		lay.CellInnerH = 3
 		return lay
 	}
 	available := innerLines - overheadLines
 	weekBudget := available - 1 // single-line DOW header
 	if weekBudget < calMonthWeekRows*minOuter {
-		lay.CellInnerH = 2
+		lay.CellInnerH = 3
 		return lay
 	}
 	cellOuterH := weekBudget / calMonthWeekRows
@@ -65,10 +65,13 @@ func computeCalMonthLayout(fullW, innerLines, overheadLines int) calMonthLayout 
 		cellOuterH = minOuter
 	}
 	lay.CellInnerH = cellOuterH - calMonthBorderLines
-	if lay.CellInnerH < 2 {
-		lay.CellInnerH = 2
+	if lay.CellInnerH < 3 {
+		lay.CellInnerH = 3
 	}
 	lay.PadLines = weekBudget - cellOuterH*calMonthWeekRows
+	if lay.PadLines < 0 {
+		lay.PadLines = 0
+	}
 	return lay
 }
 

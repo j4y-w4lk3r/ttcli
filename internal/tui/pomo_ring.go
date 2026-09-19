@@ -160,61 +160,16 @@ func formatFocusTotal(secs int) string {
 	return fmt.Sprintf("%ds", secs)
 }
 
-// renderFocusRing draws a braille donut chart; total focused time sits in the center.
+// renderFocusRing draws a compact segmented arc with focus or live-session
+// progress in the outline and the primary timer value in its center.
 func renderFocusRing(slices []focusSlice, pauses []focus.PauseSpell, now time.Time, width int) []string {
-	charW, charH := donutRingSize(width)
-	canvas := newBrailleCanvas(charW, charH)
-	drawDonut(canvas, slices, colorMuted)
-
-	if sess, err := focus.Load(); err == nil && sess.Active() {
-		if sess.State == focus.StateAwaitingDismiss {
-			if sess.InOvertimeGrace() {
-				drawSessionArc(canvas, sess.Duration, sess.Duration, colorPeach)
-			} else {
-				drawSessionArc(canvas, sess.Duration, sess.Duration, colorPeach)
-				if ot := sess.OvertimeElapsed(); ot > 0 {
-					drawSessionOvertimeArc(canvas, ot, sess.Duration, colorRed)
-				}
-			}
-		} else {
-			drawSessionArc(canvas, sess.Elapsed(), sess.Duration, colorPeach)
+	var live *focus.Session
+	if dateKey(now) == dateKey(time.Now()) {
+		if sess, err := focus.Load(); err == nil && sess.Active() {
+			live = sess
 		}
 	}
-
-	lines := canvas.lines()
-	totalLabel := timerBigStyle.Render(formatFocusTotal(totalFocusSecs(slices)))
-	subLabel := ""
-	if sess, err := focus.Load(); err == nil && sess.Active() {
-		if sess.State == focus.StateAwaitingDismiss {
-			if sess.InOvertimeGrace() {
-				totalLabel = timerBigStyle.Render(formatClock(sess.OvertimeGraceRemaining()))
-				subLabel = hintStyle.Render("dismiss now — no unclaimed time")
-			} else {
-				totalLabel = lipgloss.NewStyle().Bold(true).Foreground(colorRed).Render(formatClock(sess.OvertimeElapsed()))
-				subLabel = unclaimedLabelStyle.Render("EXTRA TIME") + "\n" + hintStyle.Render(formatFocusTotal(totalFocusSecs(slices))+" logged today")
-			}
-		} else {
-			totalLabel = timerBigStyle.Render(formatClock(sess.Remaining()))
-			sub := formatFocusTotal(totalFocusSecs(slices)) + " focused today"
-			subParts := appendFocusPauseDetail([]string{sub}, sess)
-			subLabel = hintStyle.Render(strings.Join(subParts, " · "))
-		}
-	} else if pauseSecs := totalPauseSecs(pauses, now); pauseSecs > 0 {
-		subLabel = hintStyle.Render(formatFocusTotal(totalFocusSecs(slices)) + " focused · " + formatFocusTotal(pauseSecs) + " paused")
-	}
-	if subLabel != "" {
-		lines = overlayCenterLabel(lines, totalLabel+"\n"+subLabel, charW)
-	} else {
-		lines = overlayCenterLabel(lines, totalLabel, charW)
-	}
-
-	offset := max(0, (width-charW)/2)
-	padLeft := strings.Repeat(" ", offset)
-	out := make([]string, len(lines))
-	for i, ln := range lines {
-		out[i] = truncateInner(padLeft+ln, width)
-	}
-	return out
+	return renderSegmentedFocusArc(slices, pauses, now, width, live)
 }
 
 func renderFocusLegend(slices []focusSlice, width, cursor, maxLines int) []string {
@@ -243,10 +198,6 @@ func renderFocusLegend(slices []focusSlice, width, cursor, maxLines int) []strin
 }
 
 func renderFocusLegendRow(s focusSlice, width int, selected bool, totalSecs int) string {
-	marker := "  "
-	if selected {
-		marker = pomoRailStyle.Render("▸ ")
-	}
 	if s.Kind == pomoSessionPause || focus.IsPauseLegendTitle(s.Title) {
 		titleSt := pauseTaskStyle
 		if selected {
@@ -260,7 +211,8 @@ func renderFocusLegendRow(s focusSlice, width int, selected bool, totalSecs int)
 		if lipgloss.Width(title) > maxTitleW {
 			title = truncateRunes(title, max(1, maxTitleW-1)) + "…"
 		}
-		left := marker + renderPauseMark() + " " + titleSt.Render(title)
+		indicator := renderPauseMark()
+		left := "  " + indicator + " " + titleSt.Render(title)
 		mins := max(1, s.Secs/60)
 		right := pauseLegendDurationCluster(mins, s.Secs, totalSecs, selected)
 		line := truncateInner(alignRightInWidth(left, right, width), width)
@@ -282,7 +234,8 @@ func renderFocusLegendRow(s focusSlice, width int, selected bool, totalSecs int)
 		if lipgloss.Width(title) > maxTitleW {
 			title = truncateRunes(title, max(1, maxTitleW-1)) + "…"
 		}
-		left := marker + renderUnclaimedMark() + " " + titleSt.Render(title)
+		indicator := renderUnclaimedMark()
+		left := "  " + indicator + " " + titleSt.Render(title)
 		mins := max(1, s.Secs/60)
 		right := unclaimedLegendDurationCluster(mins, s.Secs, totalSecs, selected)
 		line := truncateInner(alignRightInWidth(left, right, width), width)
@@ -304,7 +257,7 @@ func renderFocusLegendRow(s focusSlice, width int, selected bool, totalSecs int)
 	if lipgloss.Width(title) > maxTitleW {
 		title = truncateRunes(title, max(1, maxTitleW-1)) + "…"
 	}
-	left := marker + dot + " " + titleSt.Render(title)
+	left := "  " + dot + " " + titleSt.Render(title)
 	mins := max(1, s.Secs/60)
 	right := focusLegendDurationCluster(s.Title, mins, s.Secs, totalSecs, selected, s.Color)
 	line := truncateInner(alignRightInWidth(left, right, width), width)

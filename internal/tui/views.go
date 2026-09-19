@@ -10,8 +10,9 @@ import (
 
 func (m model) renderPomoBadge() string {
 	count := m.todayPomos
-	label := fmt.Sprintf("%s %d/%d", iconPomodoro, count, dailyPomoGoal)
-	return pomoTodayStyle(count, dailyPomoGoal).Render(label)
+	goal := m.uiSettings.pomoDailyGoal()
+	label := fmt.Sprintf("%s %d/%d", iconPomodoro, count, goal)
+	return pomoTodayStyle(count, goal).Render(label)
 }
 
 func (m model) renderNav() string {
@@ -176,11 +177,34 @@ func (m model) renderFooter() string {
 		return fillBarRow(statusBarStyle.Render(text), w, statusBarStyle)
 	}
 	left := m.footerStatus()
+	if m.cacheStale {
+		left += " · cached"
+		if age := cacheAge(m.cacheSavedAt); age != "" {
+			left += " " + age
+		}
+	}
 	text := " " + left
 	if hint := m.footerKeyHint(); hint != "" {
 		text += "  " + statusKeyStyle.Render(hint)
 	}
 	return fillBarRow(statusBarStyle.Render(text), w, statusBarStyle)
+}
+
+func cacheAge(savedAt time.Time) string {
+	if savedAt.IsZero() {
+		return ""
+	}
+	age := time.Since(savedAt)
+	switch {
+	case age < time.Minute:
+		return "just now"
+	case age < time.Hour:
+		return fmt.Sprintf("%dm ago", int(age.Minutes()))
+	case age < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(age.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(age.Hours()/24))
+	}
 }
 
 func (m model) footerStatus() string {
@@ -204,7 +228,11 @@ func (m model) footerStatus() string {
 	}
 	switch m.view {
 	case viewCalendar:
-		return fmt.Sprintf("calendar · %d due tasks", len(m.calTasks))
+		n := 0
+		for _, entries := range m.calIdx().byDate {
+			n += len(entries)
+		}
+		return fmt.Sprintf("calendar · %d items", n)
 	case viewPomodoro:
 		if line := activeFocusFooterLine(loadActiveFocusSession()); line != "" {
 			return line
@@ -228,19 +256,16 @@ func (m model) footerStatus() string {
 			return line
 		}
 		if m.projectName != "" {
-			open, done, trashed := m.taskCounts()
-			var parts []string
-			parts = append(parts, fmt.Sprintf("%s · %d open", m.projectName, open))
-			if m.showCompleted && done > 0 {
-				parts = append(parts, fmt.Sprintf("%d done", done))
-			} else if done > 0 {
-				parts = append(parts, fmt.Sprintf("%d done hidden", done))
+			total, matching, shown := m.taskScopeStats()
+			parts := []string{
+				m.projectName,
+				strings.ToLower(m.effectiveTaskScope().Label()),
+				fmt.Sprintf("%d total", total),
 			}
-			if m.showDeleted && trashed > 0 {
-				parts = append(parts, fmt.Sprintf("%d trashed", trashed))
-			} else if trashed > 0 {
-				parts = append(parts, fmt.Sprintf("%d trashed hidden", trashed))
+			if strings.TrimSpace(m.filterInput.Value()) != "" {
+				parts = append(parts, fmt.Sprintf("%d matching", matching))
 			}
+			parts = append(parts, fmt.Sprintf("%d shown", shown))
 			return strings.Join(parts, " · ")
 		}
 		return fmt.Sprintf("%d lists", len(m.selectableLists()))
@@ -250,13 +275,13 @@ func (m model) footerStatus() string {
 func footerHint(v appView) string {
 	switch v {
 	case viewCalendar:
-		return "? help · d/w/m/y subview · j/k · [/] navigate · Enter drill · t today · 1-4 · q quit"
+		return "? help · d/w/m/y subview · j/k · [/] navigate · Enter drill · x check-in · o overdue · t today · 1-4 · q quit"
 	case viewPomodoro:
-		return "? help · [/] day · t today · z density · j/k timeline · h/l legend · x delete · e rename · n add · s/f timer · p · S stop · 1-4 · r refresh · q quit"
+		return "? help · [/] day · t today · v design · z density · j/k timeline · h/l legend · x delete · e rename · n add · s/f timer · p · S stop · 1-4 · r refresh · q quit"
 	case viewHabits:
 		return "? help · j/k · space check-in · e rename · x delete · 1-4 · r refresh · q quit"
 	default:
-		return "? help · h/l panes · o sort · z detail · T switch task · R repeat focus · d done/reopen · c done · C trash · space mark · x delete · 1-4 · r refresh · q quit"
+		return "? help · h/l panes · c/C scope · / search · d done/restore/recreate · x check-in · space mark · Backspace trash/delete · 1-4 · r refresh · q quit"
 	}
 }
 

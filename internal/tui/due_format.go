@@ -67,9 +67,6 @@ func dueLabel(raw string, allDay bool) string {
 }
 
 func dueClockFromRaw(raw string) string {
-	if len(raw) >= 16 && raw[10] == 'T' {
-		return raw[11:16]
-	}
 	if tm, ok := parseDueTime(raw); ok {
 		return tm.Format("15:04")
 	}
@@ -134,7 +131,7 @@ func parseDueTime(raw string) (time.Time, bool) {
 	}
 	t, err := ticktick.ParseAPITime(raw)
 	if err == nil {
-		return t, true
+		return t.In(time.Local), true
 	}
 	if len(raw) >= 16 {
 		t, err = time.ParseInLocation("2006-01-02T15:04", raw[:16], time.Local)
@@ -151,9 +148,6 @@ func parseDueTime(raw string) (time.Time, bool) {
 func dueTaskClock(t ticktick.Task) string {
 	if t.IsAllDay || !hasDueTime(t.DueDate) {
 		return ""
-	}
-	if len(t.DueDate) >= 16 {
-		return t.DueDate[11:16]
 	}
 	if tm, ok := parseDueTime(t.DueDate); ok {
 		return tm.Format("15:04")
@@ -212,7 +206,7 @@ func splitAllDayTasks(tasks []ticktick.Task) (allDay, timed []ticktick.Task) {
 	return allDay, timed
 }
 
-func calTaskShouldBeDone(t ticktick.Task, day time.Time, now time.Time) bool {
+func calTaskIsPastDue(t ticktick.Task, day time.Time, now time.Time) bool {
 	dueDay, ok := parseDueDay(t.DueDate)
 	if !ok {
 		return false

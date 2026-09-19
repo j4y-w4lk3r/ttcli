@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,6 +13,8 @@ import (
 	"github.com/j4y-w4lk3r/ttcli/internal/focus"
 	"github.com/j4y-w4lk3r/ttcli/internal/notify"
 	"github.com/j4y-w4lk3r/ttcli/internal/sessionlog"
+	"github.com/j4y-w4lk3r/ttcli/internal/taskarchive"
+	"github.com/j4y-w4lk3r/ttcli/internal/taskcheckin"
 	"github.com/j4y-w4lk3r/ttcli/internal/ticktick"
 )
 
@@ -47,6 +50,7 @@ const (
 	modeListPicker
 	modeAddList
 	modeAddFolder
+	modeConfirmDelete
 )
 
 // Run starts the interactive TickTick browser.
@@ -64,6 +68,7 @@ type listRow struct {
 
 type model struct {
 	client *ticktick.Client
+	repo   *ticktick.Repository
 
 	width, height int
 	view          appView
@@ -79,59 +84,75 @@ type model struct {
 	listRows   []listRow
 	listCursor int
 
-	tasks         []ticktick.Task
-	taskCursor    int
-	taskMarked    map[string]struct{}
-	showCompleted bool
-	showDeleted   bool
+	tasks                  []ticktick.Task
+	taskCursor             int
+	taskMarked             map[string]struct{}
+	showCompleted          bool
+	showDeleted            bool
+	taskScope              TaskScope
+	archiveStore           *taskarchive.Store
+	archiveRecords         []taskarchive.Record
+	pendingPermanentDelete []ticktick.Task
 
 	projectID   string
 	projectName string
 	inboxID     string
 
-	addInput    textinput.Model
-	taskTitleInput textinput.Model
-	addTaskDueInput textinput.Model
-	addTaskTimeInput textinput.Model
+	addInput             textinput.Model
+	taskTitleInput       textinput.Model
+	addTaskDueInput      textinput.Model
+	addTaskTimeInput     textinput.Model
 	addTaskDurationInput textinput.Model
+	addTaskFocusInput    textinput.Model
+	addTaskRepeatInput   textinput.Model
 	addTaskNotesInput    textarea.Model
-	addTaskField int
-	addTaskReminderIdx int
-	addTaskPriorityIdx int
-	editTaskID         string
-	filterInput textinput.Model
-	renameInput textinput.Model
+	addTaskField         int
+	addTaskReminderIdx   int
+	addTaskPriorityIdx   int
+	addTaskRepeatIdx     int
+	addTaskRepeatFromIdx int
+	editTaskID           string
+	filterInput          textinput.Model
+	renameInput          textinput.Model
 
 	addListFolder string // folder context when creating a list
 
-	listPickerPurpose listPickerPurpose
-	listPickerRows []listPickerRow
-	listPickerCursor int
+	listPickerPurpose     listPickerPurpose
+	listPickerRows        []listPickerRow
+	listPickerCursor      int
 	listPickerTaskIDs     []string
 	listPickerFromProject string
-	listPickerListRef string
+	listPickerListRef     string
 
-	calDate       time.Time
-	calMode       calMode
-	calTaskCursor int
-	calGridCursor int
-	calTasks      []ticktick.Task
+	calDate         time.Time
+	calMode         calMode
+	calTaskCursor   int
+	calGridCursor   int
+	calDayCenterNow bool
+	calWeekViewport int
+	calTasks        []ticktick.Task
+	calCompleted    []ticktick.Task
+	calFocusByDate  map[string]*ticktick.FocusStats
+	taskCheckins    []taskcheckin.Record
+	checkinStore    *taskcheckin.Store
+	pendingCheckin  string
 
-	focusStats *ticktick.FocusStats
-	taskFocusByID    map[string]ticktick.TaskFocusSummary
-	taskFocusByTitle map[string]ticktick.TaskFocusSummary
-	pomoCursor int
-	pomoGridCursor int
-	pomoLegendCursor int
-	pomoScrollToNow  bool
-	pomoFollowNow    bool
-	pomoNowTick      time.Time
-	pomoViewDate     time.Time
-	habits     []ticktick.Habit
-	habitCursor int
+	focusStats        *ticktick.FocusStats
+	taskFocusByID     map[string]ticktick.TaskFocusSummary
+	taskFocusByTitle  map[string]ticktick.TaskFocusSummary
+	pomoCursor        int
+	pomoGridCursor    int
+	pomoViewport      int
+	pomoLegendCursor  int
+	pomoScrollToNow   bool
+	pomoFollowNow     bool
+	pomoNowTick       time.Time
+	pomoViewDate      time.Time
+	habits            []ticktick.Habit
+	habitCursor       int
 	habitCheckedToday map[string]bool
-	todayPomos  int
-	todayCompleted []ticktick.Task
+	todayPomos        int
+	todayCompleted    []ticktick.Task
 
 	focusNotifySent      bool
 	focusNotifyEscalated bool
@@ -152,12 +173,12 @@ type model struct {
 	focusPickerDurationBuf  string
 	focusPickerSwitch       bool
 
-	addPomoField            int
-	addPomoLogDate          time.Time
-	addPomoStartUnset       bool
-	addPomoStartMinutes     int
-	addPomoEditPause        bool
-	addPomoPauseInput       textinput.Model
+	addPomoField        int
+	addPomoLogDate      time.Time
+	addPomoStartUnset   bool
+	addPomoStartMinutes int
+	addPomoEditPause    bool
+	addPomoPauseInput   textinput.Model
 
 	taskSortMode TaskSortMode
 	uiSettings   uiSettings
@@ -167,6 +188,9 @@ type model struct {
 	loading bool
 	toast   string
 	errMsg  string
+
+	cacheStale   bool
+	cacheSavedAt time.Time
 }
 
 func newModel(client *ticktick.Client) model {
@@ -193,6 +217,8 @@ func newModel(client *ticktick.Client) model {
 	addDue := newAddTaskFieldInput("YYYY-MM-DD")
 	addTime := newAddTaskFieldInput("HH:MM")
 	addDur := newAddTaskFieldInput("minutes")
+	addFocus := newAddTaskFieldInput("minutes or pomos, e.g. 75m or 3p")
+	addRepeat := newAddTaskFieldInput("RRULE:… or ERULE:…")
 	addNotes := newAddTaskNotesInput()
 	taskTitle := newAddTaskFieldInput("task title…")
 	taskTitle.CharLimit = 500
@@ -200,30 +226,56 @@ func newModel(client *ticktick.Client) model {
 
 	now := time.Now()
 	settings := loadUISettings()
+	settings.applyPlanningDefaults()
+	settings.applyPomoDefaults()
 	startView := parseAppView(settings.LastView)
 	if settings.TaskDetailLayout == "" {
 		settings.TaskDetailLayout = TaskDetailBottom
 	}
-	m := model{
-		client:      client,
-		view:        startView,
-		paneFocus:   paneLists,
-		uiSettings:  settings,
-		addInput:    add,
-		taskTitleInput: taskTitle,
-		addTaskDueInput: addDue,
-		addTaskTimeInput: addTime,
-		addTaskDurationInput: addDur,
-		addTaskNotesInput:    addNotes,
-		addPomoPauseInput: addPomoPause,
-		filterInput: filter,
-		renameInput: rename,
-		calDate:     dateOnly(now),
-		calMode:     calModeMonth,
-		pomoNowTick: now,
-		pomoViewDate: dateOnly(now),
-		loading:     startView != viewTasks,
+	var repo *ticktick.Repository
+	if client != nil {
+		repo = ticktick.NewRepository(client)
 	}
+	var checkinStore *taskcheckin.Store
+	var taskCheckins []taskcheckin.Record
+	var archiveStore *taskarchive.Store
+	var archiveRecords []taskarchive.Record
+	if client != nil {
+		checkinStore = taskcheckin.NewStore()
+		taskCheckins, _ = checkinStore.Records()
+		archiveStore = taskarchive.NewStore()
+		archiveRecords, _ = archiveStore.Records()
+	}
+	m := model{
+		client:               client,
+		repo:                 repo,
+		checkinStore:         checkinStore,
+		taskCheckins:         taskCheckins,
+		archiveStore:         archiveStore,
+		archiveRecords:       archiveRecords,
+		taskScope:            normalizeTaskScope(settings.TaskScope),
+		calFocusByDate:       make(map[string]*ticktick.FocusStats),
+		view:                 startView,
+		paneFocus:            paneLists,
+		uiSettings:           settings,
+		addInput:             add,
+		taskTitleInput:       taskTitle,
+		addTaskDueInput:      addDue,
+		addTaskTimeInput:     addTime,
+		addTaskDurationInput: addDur,
+		addTaskFocusInput:    addFocus,
+		addTaskRepeatInput:   addRepeat,
+		addTaskNotesInput:    addNotes,
+		addPomoPauseInput:    addPomoPause,
+		filterInput:          filter,
+		renameInput:          rename,
+		calDate:              dateOnly(now),
+		calMode:              calModeMonth,
+		pomoNowTick:          now,
+		pomoViewDate:         dateOnly(now),
+		loading:              startView != viewTasks,
+	}
+	m.hydrateCachedData()
 	if sess, err := focus.Load(); err == nil && sess.Active() {
 		m.focusTrackedStart = sess.StartedAt
 	}
@@ -232,20 +284,103 @@ func newModel(client *ticktick.Client) model {
 
 func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
-		loadTreeCmd(m.client),
-		loadTodayPomoCmd(m.client),
+		loadTreeCmd(m.repo, true),
+		loadTodayPomoCmd(m.repo, true),
+		loadPomoHistoryCmd(m.repo, false),
 		tickCmd(),
 		focusAlertCheckCmd(),
 	}
 	switch m.view {
 	case viewCalendar:
-		cmds = append(cmds, loadCalCmd(m.client))
+		cmds = append(cmds, loadCalendarViewCmd(m.repo, m.calDate, m.calMode, true, m.uiSettings.weekStartsMonday()))
 	case viewPomodoro:
-		cmds = append(cmds, loadPomoCmd(m.client, m.pomoViewDate))
+		cmds = append(cmds,
+			loadPomoCmd(m.repo, m.pomoViewDate, true),
+			loadPomoHistoryCmd(m.repo, false),
+		)
 	case viewHabits:
-		cmds = append(cmds, loadHabitsCmd(m.client))
+		cmds = append(cmds, loadHabitsCmd(m.repo, true))
 	}
 	return tea.Batch(cmds...)
+}
+
+func (m *model) hydrateCachedData() {
+	if m.repo == nil {
+		return
+	}
+	if tree, meta, ok := m.repo.CachedTree(); ok {
+		projects := ticktick.OpenProjects(tree.Projects, false)
+		m.tree = ticktick.ProjectTreeWithInbox(tree.InboxID, tree.Groups, projects)
+		m.inboxID = tree.InboxID
+		m.listRows = buildListRows(m.tree)
+		m.listCursor = m.firstListCursor()
+		if row, ok := m.currentListRow(); ok {
+			m.projectID = row.node.ID
+			m.projectName = row.node.Name
+			if tasks, taskMeta, found := m.repo.CachedProjectTasks(row.node.ID); found {
+				m.tasks = dedupeTasks(tasks)
+				m.taskSortMode = m.uiSettings.sortForProject(row.node.ID, m.inboxID)
+				sortTasksForProject(m.tasks, m.taskSortMode)
+				m.noteCache(taskMeta, nil)
+				m.loading = false
+			}
+		}
+		m.noteCache(meta, nil)
+	}
+	if tasks, meta, ok := m.repo.CachedOpenTasks(); ok {
+		m.calTasks = tasks
+		m.noteCache(meta, nil)
+		if m.view == viewCalendar {
+			m.loading = false
+		}
+	}
+	today := dateOnly(time.Now())
+	if stats, meta, ok := m.repo.CachedFocusDay(today); ok {
+		m.todayPomos = stats.FullPomoCount
+		m.calFocusByDate[dateKey(today)] = stats
+		m.noteCache(meta, nil)
+		if m.view == viewPomodoro && dateKey(m.pomoViewDate) == dateKey(today) {
+			m.focusStats = stats
+			m.loading = false
+		}
+	}
+	if records, meta, ok := m.repo.CachedFocusHistory(); ok {
+		idx := ticktick.AggregateTaskFocus(records)
+		m.taskFocusByID = idx.ByID
+		m.taskFocusByTitle = idx.ByTitle
+		m.noteCache(meta, nil)
+	}
+	if habits, meta, ok := m.repo.CachedHabits(today); ok {
+		m.habits = habits.Habits
+		m.habitCheckedToday = map[string]bool{}
+		for id := range habits.Checkins {
+			m.habitCheckedToday[id] = true
+		}
+		m.noteCache(meta, nil)
+		if m.view == viewHabits {
+			m.loading = false
+		}
+	}
+}
+
+func (m *model) noteCache(meta ticktick.CacheMeta, err error) bool {
+	if meta.FromCache {
+		if meta.SavedAt.After(m.cacheSavedAt) {
+			m.cacheSavedAt = meta.SavedAt
+		}
+		if meta.Stale || err != nil {
+			m.cacheStale = true
+		}
+		if err != nil {
+			m.toast = "offline · showing cached data"
+		}
+		return true
+	}
+	if err == nil {
+		m.cacheStale = false
+		m.cacheSavedAt = meta.SavedAt
+	}
+	return false
 }
 
 // ---- messages ----
@@ -254,6 +389,7 @@ type treeLoadedMsg struct {
 	groups   []ticktick.ProjectGroup
 	projects []ticktick.Project
 	inboxID  string
+	cache    ticktick.CacheMeta
 	err      error
 }
 
@@ -261,6 +397,7 @@ type tasksLoadedMsg struct {
 	projectID   string
 	projectName string
 	tasks       []ticktick.Task
+	cache       ticktick.CacheMeta
 	err         error
 }
 
@@ -286,8 +423,24 @@ type taskMovedMsg struct {
 }
 
 type taskDeletedMsg struct {
-	count int
-	err   error
+	count          int
+	op             string
+	archiveRecords []taskarchive.Record
+	err            error
+}
+
+type taskRecreatedMsg struct {
+	archiveRecords []taskarchive.Record
+	taskID         string
+	err            error
+}
+
+type taskCheckinMsg struct {
+	records       []taskcheckin.Record
+	record        taskcheckin.Record
+	checked       bool
+	remoteChanged bool
+	err           error
 }
 
 type listMovedMsg struct {
@@ -330,7 +483,22 @@ type taskRenamedMsg struct {
 }
 
 type calLoadedMsg struct {
-	tasks []ticktick.Task
+	tasks     []ticktick.Task
+	completed []ticktick.Task
+	cache     ticktick.CacheMeta
+	err       error
+}
+
+type calFocusLoadedMsg struct {
+	day   time.Time
+	stats *ticktick.FocusStats
+	cache ticktick.CacheMeta
+	err   error
+}
+
+type calFocusRangeLoadedMsg struct {
+	days  map[string]*ticktick.FocusStats
+	cache ticktick.CacheMeta
 	err   error
 }
 
@@ -341,7 +509,21 @@ type pomoLoadedMsg struct {
 	taskFocusByTitle map[string]ticktick.TaskFocusSummary
 	viewDate         time.Time
 	todayFullCount   int
+	cache            ticktick.CacheMeta
 	err              error
+}
+
+type pomoHistoryLoadedMsg struct {
+	taskFocusByID    map[string]ticktick.TaskFocusSummary
+	taskFocusByTitle map[string]ticktick.TaskFocusSummary
+	cache            ticktick.CacheMeta
+	err              error
+}
+
+type todayPomoLoadedMsg struct {
+	count int
+	cache ticktick.CacheMeta
+	err   error
 }
 
 type pomoChangedMsg struct {
@@ -352,6 +534,7 @@ type pomoChangedMsg struct {
 type habitsLoadedMsg struct {
 	habits   []ticktick.Habit
 	checkins map[string]ticktick.HabitCheckin
+	cache    ticktick.CacheMeta
 	err      error
 }
 
@@ -383,6 +566,7 @@ type focusAlertCheckMsg struct {
 type focusPickerLoadedMsg struct {
 	tasks []ticktick.Task
 	names map[string]string
+	cache ticktick.CacheMeta
 	err   error
 }
 
@@ -392,29 +576,30 @@ func tickCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
-func loadTreeCmd(c *ticktick.Client) tea.Cmd {
+func loadTreeCmd(repo *ticktick.Repository, force bool) tea.Cmd {
 	return func() tea.Msg {
-		groups, err := c.ListProjectGroups()
-		if err != nil {
-			return treeLoadedMsg{err: err}
+		if repo == nil {
+			return treeLoadedMsg{err: fmt.Errorf("TickTick data repository unavailable")}
 		}
-		projects, err := c.ListProjects()
-		if err != nil {
-			return treeLoadedMsg{err: err}
+		tree, cache, err := repo.Tree(force)
+		projects := ticktick.OpenProjects(tree.Projects, false)
+		return treeLoadedMsg{
+			groups: tree.Groups, projects: projects, inboxID: tree.InboxID,
+			cache: cache, err: err,
 		}
-		projects = ticktick.OpenProjects(projects, false)
-		inboxID, _ := c.InboxID()
-		return treeLoadedMsg{groups: groups, projects: projects, inboxID: inboxID}
 	}
 }
 
-func loadTasksCmd(c *ticktick.Client, projectID, projectName string) tea.Cmd {
+func loadTasksCmd(repo *ticktick.Repository, projectID, projectName string, force bool) tea.Cmd {
 	return func() tea.Msg {
-		tasks, err := c.ProjectTasks(projectID)
-		if err != nil {
-			return tasksLoadedMsg{projectID: projectID, projectName: projectName, err: err}
+		if repo == nil {
+			return tasksLoadedMsg{projectID: projectID, projectName: projectName, err: fmt.Errorf("TickTick data repository unavailable")}
 		}
-		return tasksLoadedMsg{projectID: projectID, projectName: projectName, tasks: tasks}
+		tasks, cache, err := repo.ProjectTasks(projectID, force)
+		return tasksLoadedMsg{
+			projectID: projectID, projectName: projectName, tasks: tasks,
+			cache: cache, err: err,
+		}
 	}
 }
 
@@ -426,75 +611,186 @@ func inboxID(c *ticktick.Client) string {
 	return id
 }
 
-func loadCalCmd(c *ticktick.Client) tea.Cmd {
+func loadCalCmd(repo *ticktick.Repository, day time.Time, mode calMode, force bool, monday ...bool) tea.Cmd {
 	return func() tea.Msg {
-		tasks, err := c.AllOpenTasks()
-		return calLoadedMsg{tasks: tasks, err: err}
+		if repo == nil {
+			return calLoadedMsg{err: fmt.Errorf("TickTick data repository unavailable")}
+		}
+		tasks, cache, err := repo.OpenTasks(force)
+		if err != nil && tasks == nil {
+			return calLoadedMsg{cache: cache, err: err}
+		}
+		weekStartsMonday := true
+		if len(monday) > 0 {
+			weekStartsMonday = monday[0]
+		}
+		start, end := calendarRangeFor(day, mode, weekStartsMonday)
+		completed, completedCache, completedErr := repo.CompletedBetween(start, end, force)
+		if completedErr != nil {
+			if err == nil {
+				err = completedErr
+			}
+			if cache.SavedAt.IsZero() || completedCache.SavedAt.Before(cache.SavedAt) {
+				cache = completedCache
+			}
+		}
+		return calLoadedMsg{tasks: tasks, completed: completed, cache: cache, err: err}
 	}
 }
 
-func loadPomoCmd(c *ticktick.Client, day time.Time) tea.Cmd {
+func loadCalFocusCmd(repo *ticktick.Repository, day time.Time, force bool) tea.Cmd {
 	day = dateOnly(day)
 	return func() tea.Msg {
-		stats, err := c.FocusForDay(day)
+		if repo == nil {
+			return calFocusLoadedMsg{day: day, err: fmt.Errorf("TickTick data repository unavailable")}
+		}
+		stats, cache, err := repo.FocusDay(day, force)
+		return calFocusLoadedMsg{day: day, stats: stats, cache: cache, err: err}
+	}
+}
+
+func loadCalFocusRangeCmd(repo *ticktick.Repository, start, end time.Time, force bool) tea.Cmd {
+	return func() tea.Msg {
+		if repo == nil {
+			return calFocusRangeLoadedMsg{err: fmt.Errorf("TickTick data repository unavailable")}
+		}
+		days, cache, err := repo.FocusBetween(start, end, force)
+		return calFocusRangeLoadedMsg{days: days, cache: cache, err: err}
+	}
+}
+
+func loadCalendarViewCmd(repo *ticktick.Repository, day time.Time, mode calMode, force, monday bool) tea.Cmd {
+	cmds := []tea.Cmd{loadCalCmd(repo, day, mode, force, monday)}
+	if mode == calModeDay {
+		cmds = append(cmds, loadCalFocusCmd(repo, day, force))
+	} else {
+		start, end := calendarRangeFor(day, mode, true)
+		cmds = append(cmds, loadCalFocusRangeCmd(repo, start, end, force))
+	}
+	return tea.Batch(cmds...)
+}
+
+func (m model) loadVisibleCalendarFocusCmd(force bool) tea.Cmd {
+	if m.view != viewCalendar {
+		return nil
+	}
+	if m.calMode != calModeDay {
+		start, end := calendarRangeFor(m.calDate, m.calMode, true)
+		return loadCalFocusRangeCmd(m.repo, start, end, force)
+	}
+	return loadCalFocusCmd(m.repo, m.calDate, force)
+}
+
+func (m model) loadVisibleTaskFocusCmd(force bool) tea.Cmd {
+	if m.view != viewTasks {
+		return nil
+	}
+	return loadPomoHistoryCmd(m.repo, force)
+}
+
+func loadPomoCmd(repo *ticktick.Repository, day time.Time, force bool) tea.Cmd {
+	day = dateOnly(day)
+	return func() tea.Msg {
+		if repo == nil {
+			return pomoLoadedMsg{viewDate: day, err: fmt.Errorf("TickTick data repository unavailable")}
+		}
+		stats, cache, err := repo.FocusDay(day, force)
 		if err != nil {
-			return pomoLoadedMsg{viewDate: day, err: err}
+			if stats == nil {
+				return pomoLoadedMsg{viewDate: day, cache: cache, err: err}
+			}
 		}
-		completed, cerr := c.TasksCompletedOn(day)
+		completed, completedCache, cerr := repo.CompletedOn(day, force)
 		if cerr != nil {
-			completed = nil
+			if completed == nil {
+				completed = nil
+			}
+			if cache.SavedAt.IsZero() || completedCache.SavedAt.Before(cache.SavedAt) {
+				cache = completedCache
+			}
+			if err == nil {
+				err = cerr
+			}
 		}
-		todayStats, _ := c.FocusForDay(time.Now())
 		todayFull := 0
-		if todayStats != nil {
-			todayFull = todayStats.FullPomoCount
-		}
-		now := time.Now()
-		historyStart := now.AddDate(0, 0, -ticktick.FocusHistoryDays())
-		historyEnd := time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 999000000, now.Location())
-		history, herr := c.FocusForRange(historyStart, historyEnd)
-		var byID map[string]ticktick.TaskFocusSummary
-		var byTitle map[string]ticktick.TaskFocusSummary
-		if herr == nil {
-			idx := ticktick.AggregateTaskFocus(history)
-			byID = idx.ByID
-			byTitle = idx.ByTitle
+		if dateKey(day) == dateKey(time.Now()) {
+			todayFull = stats.FullPomoCount
+		} else {
+			todayStats, todayCache, _ := repo.FocusDay(time.Now(), false)
+			if todayStats != nil {
+				todayFull = todayStats.FullPomoCount
+			}
+			if cache.SavedAt.IsZero() {
+				cache = todayCache
+			}
 		}
 		return pomoLoadedMsg{
-			stats:            stats,
-			completed:        completed,
-			taskFocusByID:    byID,
-			taskFocusByTitle: byTitle,
-			viewDate:         day,
-			todayFullCount:   todayFull,
+			stats:          stats,
+			completed:      completed,
+			viewDate:       day,
+			todayFullCount: todayFull,
+			cache:          cache,
+			err:            err,
 		}
 	}
 }
 
-func loadTodayPomoCmd(c *ticktick.Client) tea.Cmd {
-	return loadPomoCmd(c, time.Now())
+func loadTodayPomoCmd(repo *ticktick.Repository, force bool) tea.Cmd {
+	return func() tea.Msg {
+		if repo == nil {
+			return todayPomoLoadedMsg{err: fmt.Errorf("TickTick data repository unavailable")}
+		}
+		stats, cache, err := repo.FocusDay(time.Now(), force)
+		count := 0
+		if stats != nil {
+			count = stats.FullPomoCount
+		}
+		return todayPomoLoadedMsg{count: count, cache: cache, err: err}
+	}
 }
 
-func loadFocusPickerCmd(c *ticktick.Client) tea.Cmd {
+func loadPomoHistoryCmd(repo *ticktick.Repository, force bool) tea.Cmd {
 	return func() tea.Msg {
-		tasks, err := c.AllOpenTasks()
-		if err != nil {
-			return focusPickerLoadedMsg{err: err}
+		if repo == nil {
+			return pomoHistoryLoadedMsg{err: fmt.Errorf("TickTick data repository unavailable")}
 		}
-		projects, _ := c.ListProjects()
-		names := make(map[string]string, len(projects))
-		for _, p := range projects {
+		history, cache, err := repo.FocusHistory(force)
+		if err != nil && history == nil {
+			return pomoHistoryLoadedMsg{cache: cache, err: err}
+		}
+		idx := ticktick.AggregateTaskFocus(history)
+		return pomoHistoryLoadedMsg{
+			taskFocusByID: idx.ByID, taskFocusByTitle: idx.ByTitle,
+			cache: cache, err: err,
+		}
+	}
+}
+
+func loadFocusPickerCmd(repo *ticktick.Repository) tea.Cmd {
+	return func() tea.Msg {
+		if repo == nil {
+			return focusPickerLoadedMsg{err: fmt.Errorf("TickTick data repository unavailable")}
+		}
+		tasks, cache, err := repo.OpenTasks(false)
+		if err != nil && tasks == nil {
+			return focusPickerLoadedMsg{cache: cache, err: err}
+		}
+		tree, _, _ := repo.Tree(false)
+		names := make(map[string]string, len(tree.Projects))
+		for _, p := range tree.Projects {
 			names[p.ID] = p.Name
 		}
 		return focusPickerLoadedMsg{
 			tasks: filterFocusPickerTasks(tasks),
 			names: names,
+			cache: cache,
+			err:   err,
 		}
 	}
 }
 
-func reloadPomoCmd(c *ticktick.Client, day time.Time) tea.Cmd {
-	return loadPomoCmd(c, day)
+func reloadPomoCmd(repo *ticktick.Repository, day time.Time) tea.Cmd {
+	return loadPomoCmd(repo, day, false)
 }
 
 func deletePomodoroCmd(c *ticktick.Client, id string) tea.Cmd {
@@ -516,25 +812,16 @@ func addPomodoroCmd(c *ticktick.Client, in ticktick.LogPomodoroInput) tea.Cmd {
 	}
 }
 
-func loadHabitsCmd(c *ticktick.Client) tea.Cmd {
+func loadHabitsCmd(repo *ticktick.Repository, force bool) tea.Cmd {
 	return func() tea.Msg {
-		habits, err := c.ListHabits()
-		if err != nil {
-			return habitsLoadedMsg{err: err}
+		if repo == nil {
+			return habitsLoadedMsg{err: fmt.Errorf("TickTick data repository unavailable")}
 		}
-		ids := make([]string, len(habits))
-		for i, h := range habits {
-			ids[i] = h.ID
+		snapshot, cache, err := repo.HabitsForDay(time.Now(), force)
+		return habitsLoadedMsg{
+			habits: snapshot.Habits, checkins: snapshot.Checkins,
+			cache: cache, err: err,
 		}
-		checkins, cerr := c.HabitCheckinsForDay(ids, time.Now())
-		if checkins == nil {
-			checkins = map[string]ticktick.HabitCheckin{}
-		}
-		msg := habitsLoadedMsg{habits: habits, checkins: checkins}
-		if cerr != nil {
-			msg.err = cerr
-		}
-		return msg
 	}
 }
 
@@ -557,66 +844,180 @@ func deleteHabitCmd(c *ticktick.Client, id string) tea.Cmd {
 	}
 }
 
-func completeTasksCmd(c *ticktick.Client, projectID string, taskIDs []string) tea.Cmd {
+func completeTasksCmd(c *ticktick.Client, tasks []ticktick.Task, fallbackProjectID string) tea.Cmd {
 	return func() tea.Msg {
-		n := 0
-		var lastErr error
-		for _, id := range taskIDs {
-			if err := c.CompleteTask(projectID, id); err != nil {
-				lastErr = err
-				continue
+		count := 0
+		for projectID, taskIDs := range groupTasksByProject(tasks, fallbackProjectID) {
+			if err := c.CompleteTasks(projectID, taskIDs); err != nil {
+				return taskDoneMsg{count: count, err: err}
 			}
-			n++
+			count += len(taskIDs)
 		}
-		if n == 0 && lastErr != nil {
-			return taskDoneMsg{err: lastErr}
-		}
-		if lastErr != nil {
-			return taskDoneMsg{count: n, err: fmt.Errorf("completed %d/%d: %w", n, len(taskIDs), lastErr)}
-		}
-		return taskDoneMsg{count: n}
+		return taskDoneMsg{count: count}
 	}
 }
 
-func reopenTasksCmd(c *ticktick.Client, projectID string, taskIDs []string) tea.Cmd {
+func reopenTasksCmd(c *ticktick.Client, tasks []ticktick.Task, fallbackProjectID string) tea.Cmd {
 	return func() tea.Msg {
-		n := 0
-		var lastErr error
-		for _, id := range taskIDs {
-			if err := c.ReopenTask(projectID, id); err != nil {
-				lastErr = err
-				continue
+		count := 0
+		for projectID, taskIDs := range groupTasksByProject(tasks, fallbackProjectID) {
+			if err := c.ReopenTasks(projectID, taskIDs); err != nil {
+				return taskReopenedMsg{count: count, err: err}
 			}
-			n++
+			count += len(taskIDs)
 		}
-		if n == 0 && lastErr != nil {
-			return taskReopenedMsg{err: lastErr}
-		}
-		if lastErr != nil {
-			return taskReopenedMsg{count: n, err: fmt.Errorf("reopened %d/%d: %w", n, len(taskIDs), lastErr)}
-		}
-		return taskReopenedMsg{count: n}
+		return taskReopenedMsg{count: count}
 	}
 }
 
-func deleteTasksCmd(c *ticktick.Client, projectID string, taskIDs []string) tea.Cmd {
+func trashTasksCmd(c *ticktick.Client, tasks []ticktick.Task, fallbackProjectID string) tea.Cmd {
 	return func() tea.Msg {
-		n := 0
-		var lastErr error
-		for _, id := range taskIDs {
-			if err := c.DeleteTask(projectID, id); err != nil {
-				lastErr = err
-				continue
+		count := 0
+		for projectID, taskIDs := range groupTasksByProject(tasks, fallbackProjectID) {
+			if err := c.TrashTasks(projectID, taskIDs); err != nil {
+				return taskDeletedMsg{count: count, op: "trash", err: err}
 			}
-			n++
+			count += len(taskIDs)
 		}
-		if n == 0 && lastErr != nil {
-			return taskDeletedMsg{err: lastErr}
+		return taskDeletedMsg{count: count, op: "trash"}
+	}
+}
+
+func restoreTasksCmd(c *ticktick.Client, tasks []ticktick.Task, fallbackProjectID string) tea.Cmd {
+	return func() tea.Msg {
+		count := 0
+		for projectID, taskIDs := range groupTasksByProject(tasks, fallbackProjectID) {
+			if err := c.RestoreTasks(projectID, taskIDs); err != nil {
+				return taskDeletedMsg{count: count, op: "restore", err: err}
+			}
+			count += len(taskIDs)
 		}
-		if lastErr != nil {
-			return taskDeletedMsg{count: n, err: fmt.Errorf("deleted %d/%d: %w", n, len(taskIDs), lastErr)}
+		return taskDeletedMsg{count: count, op: "restore"}
+	}
+}
+
+type permanentTaskDeleteClient interface {
+	TaskSnapshot(projectID, taskID string) (json.RawMessage, error)
+	DeleteTasks(projectID string, taskIDs []string) error
+}
+
+func permanentlyDeleteTasksCmd(
+	c permanentTaskDeleteClient,
+	store *taskarchive.Store,
+	tasks []ticktick.Task,
+	fallbackProjectID string,
+) tea.Cmd {
+	return func() tea.Msg {
+		if c == nil || store == nil {
+			return taskDeletedMsg{op: "permanent", err: fmt.Errorf("task archive or TickTick client unavailable")}
 		}
-		return taskDeletedMsg{count: n}
+		for i := range tasks {
+			if tasks[i].ProjectID == "" {
+				tasks[i].ProjectID = fallbackProjectID
+			}
+			raw, err := c.TaskSnapshot(tasks[i].ProjectID, tasks[i].ID)
+			if err != nil {
+				return taskDeletedMsg{op: "permanent", err: fmt.Errorf("snapshot %q: %w", tasks[i].Title, err)}
+			}
+			if err := store.Put(taskarchive.Record{Task: tasks[i], RawTask: raw}); err != nil {
+				return taskDeletedMsg{op: "permanent", err: fmt.Errorf("archive %q: %w", tasks[i].Title, err)}
+			}
+		}
+		records, err := store.Records()
+		if err != nil {
+			return taskDeletedMsg{op: "permanent", err: fmt.Errorf("read task archive: %w", err)}
+		}
+		count := 0
+		for projectID, taskIDs := range groupTasksByProject(tasks, fallbackProjectID) {
+			if err := c.DeleteTasks(projectID, taskIDs); err != nil {
+				return taskDeletedMsg{count: count, op: "permanent", archiveRecords: records, err: err}
+			}
+			count += len(taskIDs)
+		}
+		return taskDeletedMsg{count: count, op: "permanent", archiveRecords: records}
+	}
+}
+
+func recreateArchivedTaskCmd(c *ticktick.Client, store *taskarchive.Store, record taskarchive.Record) tea.Cmd {
+	return func() tea.Msg {
+		if c == nil || store == nil {
+			return taskRecreatedMsg{err: fmt.Errorf("task archive or TickTick client unavailable")}
+		}
+		taskID, err := c.RecreateTaskSnapshot(record.RawTask, record.Task.ProjectID)
+		if err != nil {
+			return taskRecreatedMsg{err: err}
+		}
+		if err := store.MarkRecreated(record.ArchiveID, taskID); err != nil {
+			return taskRecreatedMsg{taskID: taskID, err: fmt.Errorf("task recreated but archive update failed: %w", err)}
+		}
+		records, err := store.Records()
+		return taskRecreatedMsg{archiveRecords: records, taskID: taskID, err: err}
+	}
+}
+
+func taskCheckinKey(seriesID string, day time.Time) string {
+	return seriesID + "\x00" + dateKey(day)
+}
+
+func taskCheckinRecord(task ticktick.Task, day time.Time, native bool) taskcheckin.Record {
+	return taskcheckin.Record{
+		TaskID:      task.ID,
+		SeriesID:    task.SeriesID(),
+		ProjectID:   task.ProjectID,
+		Title:       task.Title,
+		Date:        dateKey(day),
+		CompletedAt: time.Now(),
+		Native:      native,
+	}
+}
+
+func toggleTaskCheckinCmd(
+	c *ticktick.Client,
+	store *taskcheckin.Store,
+	task ticktick.Task,
+	day time.Time,
+	currentlyDone bool,
+	native bool,
+) tea.Cmd {
+	return func() tea.Msg {
+		record := taskCheckinRecord(task, day, native)
+		if store == nil {
+			return taskCheckinMsg{record: record, err: fmt.Errorf("task check-in store unavailable")}
+		}
+		remoteChanged := false
+		if native {
+			if c == nil {
+				return taskCheckinMsg{record: record, err: fmt.Errorf("TickTick client unavailable")}
+			}
+			var err error
+			if currentlyDone {
+				err = c.ReopenTask(task.ProjectID, task.ID)
+			} else {
+				err = c.CompleteTaskOccurrence(task.ProjectID, task.ID)
+			}
+			if err != nil {
+				return taskCheckinMsg{record: record, checked: currentlyDone, err: err}
+			}
+			remoteChanged = true
+		}
+		checked := !currentlyDone
+		var err error
+		if checked {
+			err = store.Put(record)
+		} else {
+			err = store.Remove(record.SeriesID, record.Date)
+		}
+		records, loadErr := store.Records()
+		if records == nil {
+			records = []taskcheckin.Record{}
+		}
+		if err == nil {
+			err = loadErr
+		}
+		return taskCheckinMsg{
+			records: records, record: record, checked: checked,
+			remoteChanged: remoteChanged, err: err,
+		}
 	}
 }
 
@@ -800,6 +1201,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.mode == modeConfirmDelete {
+			return m.updatePermanentDeleteConfirmation(msg)
+		}
 		if m.mode == modeAddTask || m.mode == modeEditTask {
 			return m.updateAddTaskForm(msg)
 		}
@@ -825,10 +1229,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case treeLoadedMsg:
 		m.loading = false
-		if msg.err != nil {
+		if msg.err != nil && !m.noteCache(msg.cache, msg.err) {
 			m.errMsg = msg.err.Error()
 			return m, nil
 		}
+		m.noteCache(msg.cache, msg.err)
 		m.tree = ticktick.ProjectTreeWithInbox(msg.inboxID, msg.groups, msg.projects)
 		m.inboxID = msg.inboxID
 		m.listRows = buildListRows(m.tree)
@@ -849,10 +1254,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.loading = false
-		if msg.err != nil {
+		if msg.err != nil && !m.noteCache(msg.cache, msg.err) {
 			m.errMsg = msg.err.Error()
 			return m, nil
 		}
+		m.noteCache(msg.cache, msg.err)
 		m.projectID = msg.projectID
 		m.projectName = msg.projectName
 		m.tasks = dedupeTasks(msg.tasks)
@@ -867,35 +1273,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case taskReopenedMsg:
 		m.clearTaskMarks()
+		if m.repo != nil && (msg.err == nil || msg.count > 0) {
+			m.repo.InvalidateTasks(m.projectID)
+		}
 		if msg.err != nil {
 			if msg.count > 0 {
 				m.toast = fmt.Sprintf("%s reopened %d", iconCheck, msg.count)
 			}
 			m.errMsg = msg.err.Error()
-			return m, loadTasksCmd(m.client, m.projectID, m.projectName)
+			return m, loadTasksCmd(m.repo, m.projectID, m.projectName, false)
 		}
 		if msg.count > 1 {
 			m.toast = fmt.Sprintf("%s reopened %d tasks", iconCheck, msg.count)
 		} else {
 			m.toast = iconCheck + " reopened"
 		}
-		return m, loadTasksCmd(m.client, m.projectID, m.projectName)
+		return m, loadTasksCmd(m.repo, m.projectID, m.projectName, false)
 
 	case taskDoneMsg:
 		m.clearTaskMarks()
+		if m.repo != nil && (msg.err == nil || msg.count > 0) {
+			m.repo.InvalidateTasks(m.projectID)
+		}
 		if msg.err != nil {
 			if msg.count > 0 {
 				m.toast = fmt.Sprintf("%s completed %d", iconCheck, msg.count)
 			}
 			m.errMsg = msg.err.Error()
-			return m, loadTasksCmd(m.client, m.projectID, m.projectName)
+			return m, loadTasksCmd(m.repo, m.projectID, m.projectName, false)
 		}
 		if msg.count > 1 {
 			m.toast = fmt.Sprintf("%s completed %d tasks", iconCheck, msg.count)
 		} else {
 			m.toast = iconCheck + " completed"
 		}
-		return m, loadTasksCmd(m.client, m.projectID, m.projectName)
+		return m, loadTasksCmd(m.repo, m.projectID, m.projectName, false)
 
 	case taskAddedMsg:
 		m.mode = modeNormal
@@ -905,12 +1317,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errMsg = msg.err.Error()
 			return m, nil
 		}
+		if m.repo != nil {
+			m.repo.InvalidateTasks(m.projectID)
+		}
 		m.toast = fmt.Sprintf("added %q", msg.title)
-		return m, loadTasksCmd(m.client, m.projectID, m.projectName)
+		return m, loadTasksCmd(m.repo, m.projectID, m.projectName, false)
 
 	case taskMovedMsg:
 		m.mode = modeNormal
 		m.clearTaskMarks()
+		if m.repo != nil && (msg.err == nil || msg.count > 0) {
+			m.repo.InvalidateTasks(m.projectID)
+			m.repo.InvalidateTree()
+		}
 		if msg.err != nil {
 			if msg.count > 0 {
 				m.toast = fmt.Sprintf("%s moved %d to %s (some failed)", iconCheck, msg.count, msg.destName)
@@ -918,30 +1337,88 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.toast = iconOverdue + " move failed"
 			}
 			m.errMsg = msg.err.Error()
-			return m, tea.Batch(loadTreeCmd(m.client), loadTasksCmd(m.client, m.projectID, m.projectName))
+			return m, tea.Batch(loadTreeCmd(m.repo, false), loadTasksCmd(m.repo, m.projectID, m.projectName, false))
 		}
 		if msg.count > 1 {
 			m.toast = fmt.Sprintf("%s moved %d tasks to %s", iconCheck, msg.count, msg.destName)
 		} else {
 			m.toast = iconCheck + " moved to " + msg.destName
 		}
-		return m, tea.Batch(loadTreeCmd(m.client), loadTasksCmd(m.client, m.projectID, m.projectName))
+		return m, tea.Batch(loadTreeCmd(m.repo, false), loadTasksCmd(m.repo, m.projectID, m.projectName, false))
 
 	case taskDeletedMsg:
 		m.clearTaskMarks()
+		m.mode = modeNormal
+		m.pendingPermanentDelete = nil
+		if msg.archiveRecords != nil {
+			m.archiveRecords = msg.archiveRecords
+		}
+		if m.repo != nil && (msg.err == nil || msg.count > 0) {
+			m.repo.InvalidateTasks(m.projectID)
+		}
 		if msg.err != nil {
 			if msg.count > 0 {
-				m.toast = fmt.Sprintf("%s deleted %d", iconCheck, msg.count)
+				m.toast = fmt.Sprintf("%s %s %d task(s); remaining operation failed", iconCheck, msg.op, msg.count)
 			}
 			m.errMsg = msg.err.Error()
-			return m, loadTasksCmd(m.client, m.projectID, m.projectName)
+			return m, loadTasksCmd(m.repo, m.projectID, m.projectName, false)
 		}
-		if msg.count > 1 {
-			m.toast = fmt.Sprintf("%s deleted %d tasks", iconCheck, msg.count)
+		switch msg.op {
+		case "restore":
+			m.toast = fmt.Sprintf("%s restored %d task(s)", iconCheck, msg.count)
+		case "permanent":
+			m.toast = fmt.Sprintf("%s permanently deleted %d task(s) · snapshot archived", iconCheck, msg.count)
+		default:
+			m.toast = fmt.Sprintf("%s moved %d task(s) to Trash", iconCheck, msg.count)
+		}
+		return m, loadTasksCmd(m.repo, m.projectID, m.projectName, false)
+
+	case taskRecreatedMsg:
+		if msg.archiveRecords != nil {
+			m.archiveRecords = msg.archiveRecords
+		}
+		if msg.err != nil {
+			m.errMsg = msg.err.Error()
+			if msg.taskID != "" {
+				m.toast = iconCheck + " task recreated; archive status update failed"
+			}
+			return m, nil
+		}
+		if m.repo != nil {
+			m.repo.InvalidateTasks(m.projectID)
+		}
+		m.toast = iconCheck + " archived task recreated as a new task"
+		return m, loadTasksCmd(m.repo, m.projectID, m.projectName, false)
+
+	case taskCheckinMsg:
+		m.pendingCheckin = ""
+		if msg.records != nil {
+			m.taskCheckins = msg.records
+		}
+		if msg.remoteChanged && m.repo != nil {
+			m.repo.InvalidateTasks(msg.record.ProjectID)
+		}
+		if msg.err != nil {
+			if msg.remoteChanged {
+				m.toast = "TickTick updated · local history failed"
+			}
+			m.errMsg = msg.err.Error()
+		} else if msg.checked {
+			if msg.record.Native {
+				m.toast = iconCheck + " recurring occurrence completed"
+			} else {
+				m.toast = iconCheck + " checked in locally"
+			}
 		} else {
-			m.toast = iconCheck + " task deleted"
+			m.toast = iconCheck + " check-in undone"
 		}
-		return m, loadTasksCmd(m.client, m.projectID, m.projectName)
+		if !msg.remoteChanged {
+			return m, nil
+		}
+		return m, tea.Batch(
+			loadTasksCmd(m.repo, m.projectID, m.projectName, false),
+			loadCalendarViewCmd(m.repo, m.calDate, m.calMode, false, m.uiSettings.weekStartsMonday()),
+		)
 
 	case listMovedMsg:
 		m.mode = modeNormal
@@ -949,8 +1426,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errMsg = msg.err.Error()
 			return m, nil
 		}
+		if m.repo != nil {
+			m.repo.InvalidateTree()
+		}
 		m.toast = iconCheck + " list moved"
-		return m, loadTreeCmd(m.client)
+		return m, loadTreeCmd(m.repo, false)
 
 	case listAddedMsg:
 		m.mode = modeNormal
@@ -960,8 +1440,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errMsg = msg.err.Error()
 			return m, nil
 		}
+		if m.repo != nil {
+			m.repo.InvalidateTree()
+		}
 		m.toast = iconCheck + " list " + msg.name
-		return m, loadTreeCmd(m.client)
+		return m, loadTreeCmd(m.repo, false)
 
 	case folderAddedMsg:
 		m.mode = modeNormal
@@ -970,13 +1453,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errMsg = msg.err.Error()
 			return m, nil
 		}
+		if m.repo != nil {
+			m.repo.InvalidateTree()
+		}
 		m.toast = iconCheck + " folder " + msg.name
-		return m, loadTreeCmd(m.client)
+		return m, loadTreeCmd(m.repo, false)
 
 	case listDeletedMsg:
 		if msg.err != nil {
 			m.errMsg = msg.err.Error()
 			return m, nil
+		}
+		if m.repo != nil {
+			m.repo.InvalidateTree()
 		}
 		m.toast = iconCheck + " deleted " + msg.name
 		if msg.kind == "list" && strings.EqualFold(m.projectName, msg.name) {
@@ -984,7 +1473,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.projectName = ""
 			m.tasks = nil
 		}
-		return m, tea.Batch(loadTreeCmd(m.client), loadTasksCmd(m.client, m.projectID, m.projectName))
+		return m, tea.Batch(loadTreeCmd(m.repo, false), loadTasksCmd(m.repo, m.projectID, m.projectName, false))
 
 	case listRenamedMsg:
 		m.mode = modeNormal
@@ -993,11 +1482,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errMsg = msg.err.Error()
 			return m, nil
 		}
+		if m.repo != nil {
+			m.repo.InvalidateTree()
+		}
 		m.toast = fmt.Sprintf("renamed list → %q", msg.newName)
 		if msg.kind == "list" && m.projectID != "" && strings.EqualFold(m.projectName, msg.oldName) {
 			m.projectName = msg.newName
 		}
-		return m, tea.Batch(loadTreeCmd(m.client), loadTasksCmd(m.client, m.projectID, m.projectName))
+		return m, tea.Batch(loadTreeCmd(m.repo, false), loadTasksCmd(m.repo, m.projectID, m.projectName, false))
 
 	case taskUpdatedMsg:
 		m.mode = modeNormal
@@ -1007,8 +1499,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errMsg = msg.err.Error()
 			return m, nil
 		}
+		if m.repo != nil {
+			m.repo.InvalidateTasks(m.projectID)
+		}
 		m.toast = fmt.Sprintf("%s updated %q", iconCheck, msg.title)
-		return m, loadTasksCmd(m.client, m.projectID, m.projectName)
+		return m, loadTasksCmd(m.repo, m.projectID, m.projectName, false)
 
 	case taskRenamedMsg:
 		m.mode = modeNormal
@@ -1017,29 +1512,69 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errMsg = msg.err.Error()
 			return m, nil
 		}
+		if m.repo != nil {
+			m.repo.InvalidateTasks(m.projectID)
+		}
 		m.toast = fmt.Sprintf("renamed task → %q", msg.newTitle)
-		return m, loadTasksCmd(m.client, m.projectID, m.projectName)
+		return m, loadTasksCmd(m.repo, m.projectID, m.projectName, false)
 
 	case calLoadedMsg:
 		m.loading = false
-		if msg.err != nil {
+		if msg.err != nil && !m.noteCache(msg.cache, msg.err) {
 			m.errMsg = msg.err.Error()
 			return m, nil
 		}
+		m.noteCache(msg.cache, msg.err)
 		m.calTasks = msg.tasks
+		m.calCompleted = msg.completed
+		return m, nil
+
+	case calFocusLoadedMsg:
+		if msg.err != nil && msg.stats == nil {
+			if m.view == viewCalendar && m.calMode == calModeDay && dateKey(msg.day) == dateKey(m.calDate) {
+				if !m.noteCache(msg.cache, msg.err) {
+					m.errMsg = msg.err.Error()
+				}
+			}
+			return m, nil
+		}
+		m.noteCache(msg.cache, msg.err)
+		if m.calFocusByDate == nil {
+			m.calFocusByDate = make(map[string]*ticktick.FocusStats)
+		}
+		m.calFocusByDate[dateKey(msg.day)] = msg.stats
+		return m, nil
+
+	case calFocusRangeLoadedMsg:
+		if msg.err != nil && len(msg.days) == 0 {
+			if m.view == viewCalendar && !m.noteCache(msg.cache, msg.err) {
+				m.errMsg = msg.err.Error()
+			}
+			return m, nil
+		}
+		m.noteCache(msg.cache, msg.err)
+		if m.calFocusByDate == nil {
+			m.calFocusByDate = make(map[string]*ticktick.FocusStats)
+		}
+		for key, stats := range msg.days {
+			m.calFocusByDate[key] = stats
+		}
 		return m, nil
 
 	case pomoLoadedMsg:
 		if !msg.viewDate.IsZero() && dateKey(msg.viewDate) != dateKey(m.pomoViewDate) {
 			return m, nil
 		}
-		if msg.err != nil {
+		if msg.err != nil && msg.stats == nil {
 			if m.view == viewPomodoro {
 				m.loading = false
-				m.errMsg = msg.err.Error()
+				if !m.noteCache(msg.cache, msg.err) {
+					m.errMsg = msg.err.Error()
+				}
 			}
 			return m, nil
 		}
+		m.noteCache(msg.cache, msg.err)
 		m.focusStats = msg.stats
 		m.todayCompleted = msg.completed
 		if !msg.viewDate.IsZero() {
@@ -1091,6 +1626,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case pomoHistoryLoadedMsg:
+		if msg.err != nil && msg.taskFocusByID == nil {
+			if !m.noteCache(msg.cache, msg.err) {
+				m.errMsg = msg.err.Error()
+			}
+			return m, nil
+		}
+		m.noteCache(msg.cache, msg.err)
+		m.taskFocusByID = msg.taskFocusByID
+		m.taskFocusByTitle = msg.taskFocusByTitle
+		return m, nil
+
+	case todayPomoLoadedMsg:
+		if msg.err != nil && !m.noteCache(msg.cache, msg.err) {
+			if m.view == viewPomodoro {
+				m.errMsg = msg.err.Error()
+			}
+			return m, nil
+		}
+		m.noteCache(msg.cache, msg.err)
+		m.todayPomos = msg.count
+		return m, nil
+
 	case pomoChangedMsg:
 		m.mode = modeNormal
 		m.addInput.Blur()
@@ -1098,6 +1656,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.errMsg = msg.err.Error()
 			return m, nil
+		}
+		if m.repo != nil {
+			m.repo.InvalidateFocus(m.pomoViewDate)
 		}
 		switch msg.op {
 		case "delete":
@@ -1109,10 +1670,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			m.toast = iconCheck + " pomodoro saved"
 		}
-		return m, reloadPomoCmd(m.client, m.pomoViewDate)
+		return m, tea.Batch(
+			reloadPomoCmd(m.repo, m.pomoViewDate),
+			loadPomoHistoryCmd(m.repo, false),
+		)
 
 	case habitsLoadedMsg:
 		m.loading = false
+		if msg.err != nil && msg.habits == nil && !m.noteCache(msg.cache, msg.err) {
+			m.errMsg = msg.err.Error()
+			return m, nil
+		}
+		m.noteCache(msg.cache, msg.err)
 		m.habits = msg.habits
 		m.habitCheckedToday = map[string]bool{}
 		for id := range msg.checkins {
@@ -1120,9 +1689,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.habitCursor >= len(m.habits) {
 			m.habitCursor = max(len(m.habits)-1, 0)
-		}
-		if msg.err != nil {
-			m.errMsg = msg.err.Error()
 		}
 		return m, nil
 
@@ -1133,8 +1699,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errMsg = msg.err.Error()
 			return m, nil
 		}
+		if m.repo != nil {
+			m.repo.InvalidateHabits()
+		}
 		m.toast = iconCheck + " habit updated"
-		return m, loadHabitsCmd(m.client)
+		return m, loadHabitsCmd(m.repo, false)
 
 	case focusActionMsg:
 		syncWarn := ""
@@ -1151,6 +1720,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			default:
 				m.errMsg = msg.err.Error()
 				return m, nil
+			}
+		}
+		if m.repo != nil && msg.err == nil {
+			switch msg.action {
+			case "finalize", "stop", "repeat":
+				m.repo.InvalidateFocus(m.pomoViewDate)
+				m.repo.InvalidateFocus(time.Now())
 			}
 		}
 		switch msg.action {
@@ -1174,7 +1750,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if syncWarn != "" {
 				m.toast = "dismissed · TickTick sync failed"
 			}
-			return m, tea.Batch(loadPomoCmd(m.client, m.pomoViewDate), focusDismissNotifyCmd())
+			return m, tea.Batch(loadPomoCmd(m.repo, m.pomoViewDate, false), m.loadVisibleCalendarFocusCmd(false), m.loadVisibleTaskFocusCmd(false), focusDismissNotifyCmd())
 		case "stop":
 			m.focusNotifySent = false
 			m.focusNotifyEscalated = false
@@ -1189,7 +1765,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.toast = "focus stopped"
 			}
-			return m, tea.Batch(loadPomoCmd(m.client, m.pomoViewDate), focusDismissNotifyCmd())
+			return m, tea.Batch(loadPomoCmd(m.repo, m.pomoViewDate, false), m.loadVisibleCalendarFocusCmd(false), m.loadVisibleTaskFocusCmd(false), focusDismissNotifyCmd())
 		case "repeat":
 			m.focusNotifySent = false
 			m.focusNotifyEscalated = false
@@ -1213,17 +1789,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.toast = "focus repeated"
 			}
-			return m, tea.Batch(loadPomoCmd(m.client, m.pomoViewDate), loadTodayPomoCmd(m.client), focusDismissNotifyCmd())
+			return m, tea.Batch(loadPomoCmd(m.repo, m.pomoViewDate, false), loadTodayPomoCmd(m.repo, false), m.loadVisibleCalendarFocusCmd(false), m.loadVisibleTaskFocusCmd(false), focusDismissNotifyCmd())
 		case "switch":
 			if msg.taskTitle != "" {
 				m.toast = fmt.Sprintf("switched to %q · timer running", msg.taskTitle)
 			} else {
 				m.toast = "task switched · timer running"
 			}
-			return m, tea.Batch(loadPomoCmd(m.client, m.pomoViewDate), loadTodayPomoCmd(m.client))
+			return m, tea.Batch(loadPomoCmd(m.repo, m.pomoViewDate, false), loadTodayPomoCmd(m.repo, false), m.loadVisibleCalendarFocusCmd(false), m.loadVisibleTaskFocusCmd(false))
 		}
 		m.toast = "focus " + msg.action
-		return m, loadPomoCmd(m.client, m.pomoViewDate)
+		return m, tea.Batch(loadPomoCmd(m.repo, m.pomoViewDate, false), m.loadVisibleCalendarFocusCmd(false), m.loadVisibleTaskFocusCmd(false))
 
 	case focusNotifyMsg:
 		if msg.err != nil {
@@ -1262,11 +1838,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case focusPickerLoadedMsg:
 		m.focusPickerLoading = false
-		if msg.err != nil {
+		if msg.err != nil && msg.tasks == nil {
 			m.mode = modeNormal
-			m.errMsg = msg.err.Error()
+			if !m.noteCache(msg.cache, msg.err) {
+				m.errMsg = msg.err.Error()
+			}
 			return m, nil
 		}
+		m.noteCache(msg.cache, msg.err)
 		m.focusPickerTasks = msg.tasks
 		m.focusPickerProjectNames = msg.names
 		m.focusPickerFilter = ""
@@ -1275,6 +1854,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.pomoNowTick = time.Now()
+		if m.view == viewPomodoro && m.pomoFollowNow {
+			m.centerPomoTimelineOnNow()
+		}
 		return m.handleFocusTick()
 	}
 
@@ -1419,10 +2001,10 @@ func (m model) switchView(v appView) (model, tea.Cmd) {
 	var load tea.Cmd
 	switch v {
 	case viewCalendar:
-		m.loading = true
-		load = loadCalCmd(m.client)
+		m.loading = len(m.calTasks) == 0
+		load = loadCalendarViewCmd(m.repo, m.calDate, m.calMode, false, m.uiSettings.weekStartsMonday())
 	case viewPomodoro:
-		m.loading = true
+		m.loading = m.focusStats == nil
 		m.pomoCursor = 0
 		m.pomoGridCursor = 0
 		m.pomoLegendCursor = 0
@@ -1431,13 +2013,19 @@ func (m model) switchView(v appView) (model, tea.Cmd) {
 		if m.pomoViewDate.IsZero() {
 			m.pomoViewDate = dateOnly(time.Now())
 		}
-		load = loadPomoCmd(m.client, m.pomoViewDate)
+		load = tea.Batch(
+			loadPomoCmd(m.repo, m.pomoViewDate, false),
+			loadPomoHistoryCmd(m.repo, false),
+		)
 	case viewHabits:
-		m.loading = true
-		load = loadHabitsCmd(m.client)
+		m.loading = len(m.habits) == 0
+		load = loadHabitsCmd(m.repo, false)
 	default:
 		m.loading = false
-		load = loadTodayPomoCmd(m.client)
+		load = tea.Batch(
+			loadTodayPomoCmd(m.repo, false),
+			loadPomoHistoryCmd(m.repo, false),
+		)
 	}
 	// Reset cursor home + clear clutter when pane layout changes (e.g. calendar ↔ tasks).
 	clear := func() tea.Msg { return tea.ClearScreen() }
@@ -1452,14 +2040,108 @@ func (m model) refreshView() (model, tea.Cmd) {
 	m.errMsg = ""
 	switch m.view {
 	case viewCalendar:
-		return m, loadCalCmd(m.client)
+		return m, loadCalendarViewCmd(m.repo, m.calDate, m.calMode, true, m.uiSettings.weekStartsMonday())
 	case viewPomodoro:
-		return m, loadPomoCmd(m.client, m.pomoViewDate)
+		return m, tea.Batch(
+			loadPomoCmd(m.repo, m.pomoViewDate, true),
+			loadPomoHistoryCmd(m.repo, true),
+		)
 	case viewHabits:
-		return m, loadHabitsCmd(m.client)
+		return m, loadHabitsCmd(m.repo, true)
 	default:
-		return m, tea.Batch(loadTreeCmd(m.client), loadTasksCmd(m.client, m.projectID, m.projectName), loadTodayPomoCmd(m.client))
+		return m, tea.Batch(
+			loadTreeCmd(m.repo, true),
+			loadTasksCmd(m.repo, m.projectID, m.projectName, true),
+			loadTodayPomoCmd(m.repo, true),
+			loadPomoHistoryCmd(m.repo, true),
+		)
 	}
+}
+
+func (m model) checkinFor(seriesID string, day time.Time) (taskcheckin.Record, bool) {
+	date := dateKey(day)
+	for _, record := range m.taskCheckins {
+		recordSeries := record.SeriesID
+		if recordSeries == "" {
+			recordSeries = record.TaskID
+		}
+		if recordSeries == seriesID && record.Date == date {
+			return record, true
+		}
+	}
+	return taskcheckin.Record{}, false
+}
+
+func (m model) beginTaskCheckin(
+	task ticktick.Task,
+	day time.Time,
+	currentlyDone bool,
+	native bool,
+) (model, tea.Cmd) {
+	day = dateOnly(day)
+	if day.After(dateOnly(time.Now())) {
+		m.errMsg = "cannot check in a future date"
+		return m, nil
+	}
+	if task.ID == "" {
+		m.errMsg = "select a task to check in"
+		return m, nil
+	}
+	if task.ProjectID == "" {
+		task.ProjectID = m.projectID
+	}
+	m.errMsg = ""
+	m.pendingCheckin = taskCheckinKey(task.SeriesID(), day)
+	if currentlyDone {
+		m.toast = "undoing check-in…"
+	} else {
+		m.toast = "checking in…"
+	}
+	return m, toggleTaskCheckinCmd(
+		m.client, m.checkinStore, task, day, currentlyDone, native,
+	)
+}
+
+func (m model) selectedCalEntry() (calEntry, bool) {
+	idx := m.calIdx()
+	switch m.calMode {
+	case calModeDay:
+		rows, _ := m.calDayRows(idx)
+		if len(rows) == 0 {
+			return calEntry{}, false
+		}
+		row := rows[normalizeCalDayGridCursor(rows, m.calGridCursor)]
+		if calDayRowSelectable(row) {
+			return row.entry, true
+		}
+	case calModeWeek:
+		rows := m.calWeekRows(idx)
+		if len(rows) == 0 {
+			return calEntry{}, false
+		}
+		row := rows[normalizeCalWeekGridCursor(rows, m.calGridCursor)]
+		if calWeekRowSelectable(row) {
+			return row.entry, true
+		}
+	}
+	return calEntry{}, false
+}
+
+func (m model) updatePermanentDeleteConfirmation(msg tea.KeyMsg) (model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y", "enter":
+		tasks := append([]ticktick.Task(nil), m.pendingPermanentDelete...)
+		m.pendingPermanentDelete = nil
+		m.mode = modeNormal
+		m.toast = "archiving before permanent deletion…"
+		return m, permanentlyDeleteTasksCmd(m.client, m.archiveStore, tasks, m.projectID)
+	case "n", "N", "esc":
+		m.pendingPermanentDelete = nil
+		m.mode = modeNormal
+		m.toast = "permanent deletion cancelled"
+		return m, nil
+	}
+	return m, nil
 }
 
 func (m model) updateTasksKey(msg tea.KeyMsg) (model, tea.Cmd) {
@@ -1557,57 +2239,85 @@ func (m model) updateTasksKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m.clearTaskMarks(), nil
 		}
 		return m, nil
-	case "x", "backspace":
+	case "x":
+		if m.paneFocus == paneTasks {
+			task, ok := m.selectedTask()
+			if !ok {
+				m.errMsg = "select a task to check in"
+				return m, nil
+			}
+			if task.Trashed() {
+				m.errMsg = "task is in trash"
+				return m, nil
+			}
+			record, checked := m.checkinFor(task.SeriesID(), time.Now())
+			if task.Repeating() && checked && !task.Done() && record.Native {
+				m.toast = "already checked in today · undo from Calendar day view"
+				return m, nil
+			}
+			if task.Done() && !task.Repeating() {
+				m.errMsg = "task is already completed in TickTick"
+				return m, nil
+			}
+			return m.beginTaskCheckin(task, time.Now(), checked || task.Done(), task.Repeating())
+		}
+		if m.paneFocus != paneLists {
+			return m, nil
+		}
+		row, ok := m.currentListRowForRename()
+		if !ok {
+			m.errMsg = "select a list or folder to delete"
+			return m, nil
+		}
+		ref := row.node.Name
+		if row.node.ID != "" {
+			ref = row.node.ID
+		}
+		return m, deleteListOrFolderCmd(m.client, row.node.Kind, ref)
+	case "backspace":
 		if m.paneFocus == paneTasks {
 			toDelete := m.tasksToDelete()
 			if len(toDelete) == 0 {
 				return m, nil
 			}
-			ids := make([]string, len(toDelete))
-			for i, t := range toDelete {
-				ids[i] = t.ID
-			}
-			return m, deleteTasksCmd(m.client, m.projectID, ids)
-		}
-		if m.paneFocus == paneLists {
-			row, ok := m.currentListRowForRename()
-			if !ok {
-				m.errMsg = "select a list or folder to delete"
+			switch m.effectiveTaskScope() {
+			case TaskScopeArchive:
+				m.errMsg = "archive records are durable recovery snapshots"
 				return m, nil
+			case TaskScopeTrash:
+				m.pendingPermanentDelete = toDelete
+				m.mode = modeConfirmDelete
+				m.toast = fmt.Sprintf("permanently delete %d task(s)?", len(toDelete))
+				return m, nil
+			default:
+				return m, trashTasksCmd(m.client, toDelete, m.projectID)
 			}
-			ref := row.node.Name
-			if row.node.ID != "" {
-				ref = row.node.ID
-			}
-			return m, deleteListOrFolderCmd(m.client, row.node.Kind, ref)
 		}
-		return m, nil
+		if m.paneFocus != paneLists {
+			return m, nil
+		}
+		row, ok := m.currentListRowForRename()
+		if !ok {
+			m.errMsg = "select a list or folder to delete"
+			return m, nil
+		}
+		ref := row.node.Name
+		if row.node.ID != "" {
+			ref = row.node.ID
+		}
+		return m, deleteListOrFolderCmd(m.client, row.node.Kind, ref)
 	case "/":
 		m.mode = modeFilter
 		m.filterInput.Focus()
 		return m, textinput.Blink
 	case "c":
 		if m.paneFocus == paneTasks {
-			m.showCompleted = !m.showCompleted
-			m.applyFilter()
-			open, done, _ := m.taskCounts()
-			if m.showCompleted {
-				m.toast = fmt.Sprintf("%d open · %d done", open, done)
-			} else {
-				m.toast = fmt.Sprintf("%d open", open)
-			}
+			m = m.setTaskScope(m.effectiveTaskScope().Next())
 		}
 		return m, nil
 	case "C":
 		if m.paneFocus == paneTasks {
-			m.showDeleted = !m.showDeleted
-			m.applyFilter()
-			open, done, trashed := m.taskCounts()
-			if m.showDeleted {
-				m.toast = fmt.Sprintf("%d open · %d done · %d trashed", open, done, trashed)
-			} else {
-				m.toast = fmt.Sprintf("%d open · %d done", open, done)
-			}
+			m = m.setTaskScope(m.effectiveTaskScope().Prev())
 		}
 		return m, nil
 	case "o", "O":
@@ -1638,22 +2348,46 @@ func (m model) updateTasksKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		if m.paneFocus != paneTasks {
 			return m, nil
 		}
-		if toReopen := m.tasksToReopen(); len(toReopen) > 0 {
-			ids := make([]string, len(toReopen))
-			for i, t := range toReopen {
-				ids[i] = t.ID
+		if m.effectiveTaskScope() == TaskScopeArchive {
+			task, ok := m.selectedTask()
+			if !ok {
+				return m, nil
 			}
-			return m, reopenTasksCmd(m.client, m.projectID, ids)
+			record, ok := m.archiveRecordForTaskID(task.ID)
+			if !ok {
+				m.errMsg = "archive record unavailable"
+				return m, nil
+			}
+			m.toast = "recreating archived task…"
+			return m, recreateArchivedTaskCmd(m.client, m.archiveStore, record)
+		}
+		if m.effectiveTaskScope() == TaskScopeTrash {
+			toRestore := m.tasksToDelete()
+			if len(toRestore) == 0 {
+				return m, nil
+			}
+			return m, restoreTasksCmd(m.client, toRestore, m.projectID)
+		}
+		if toReopen := m.tasksToReopen(); len(toReopen) > 0 {
+			for _, task := range toReopen {
+				if task.Repeating() {
+					m.errMsg = "use x to check in recurring tasks"
+					return m, nil
+				}
+			}
+			return m, reopenTasksCmd(m.client, toReopen, m.projectID)
 		}
 		toComplete := m.tasksToComplete()
 		if len(toComplete) == 0 {
 			return m, nil
 		}
-		ids := make([]string, len(toComplete))
-		for i, t := range toComplete {
-			ids[i] = t.ID
+		for _, task := range toComplete {
+			if task.Repeating() {
+				m.errMsg = "use x to check in recurring tasks"
+				return m, nil
+			}
 		}
-		return m, completeTasksCmd(m.client, m.projectID, ids)
+		return m, completeTasksCmd(m.client, toComplete, m.projectID)
 	case "j", "down":
 		if m.paneFocus == paneLists {
 			m.listCursor = m.nextListCursor(1)
@@ -1717,46 +2451,118 @@ func (m model) updateTasksKey(msg tea.KeyMsg) (model, tea.Cmd) {
 
 func (m model) updateCalKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	switch msg.String() {
+	case "o":
+		if m.calMode != calModeDay {
+			return m, nil
+		}
+		m.uiSettings.CalendarDayShowOverdue = !m.uiSettings.CalendarDayShowOverdue
+		m.calGridCursor = 0
+		if err := saveUISettings(m.uiSettings); err != nil {
+			m.errMsg = "settings: " + err.Error()
+		} else if m.uiSettings.CalendarDayShowOverdue {
+			m.toast = "overdue tasks shown"
+		} else {
+			m.toast = "overdue tasks hidden"
+		}
+		return m, nil
+	case "x":
+		entry, ok := m.selectedCalEntry()
+		if !ok {
+			m.errMsg = "select a Day or Week task to check in"
+			return m, nil
+		}
+		return m.beginTaskCheckin(entry.Task, entry.Date, entry.Done(), entry.NativeCheckin())
 	case "d":
 		m.calMode = calModeDay
 		m.calDate = dateOnly(time.Now())
 		m.calTaskCursor = 0
 		m.calGridCursor = 0
-		return m, nil
+		m.calDayCenterNow = true
+		m.calWeekViewport = 0
+		return m, loadCalendarViewCmd(m.repo, m.calDate, m.calMode, false, m.uiSettings.weekStartsMonday())
 	case "w":
 		m.calMode = calModeWeek
 		m.calTaskCursor = 0
 		m.calGridCursor = 0
-		return m, nil
+		m.calDayCenterNow = false
+		m.calWeekViewport = 0
+		return m, loadCalendarViewCmd(m.repo, m.calDate, m.calMode, false, m.uiSettings.weekStartsMonday())
 	case "m":
 		m.calMode = calModeMonth
 		m.calTaskCursor = 0
 		m.calGridCursor = 0
-		return m, nil
+		m.calDayCenterNow = false
+		m.calWeekViewport = 0
+		return m, loadCalendarViewCmd(m.repo, m.calDate, m.calMode, false, m.uiSettings.weekStartsMonday())
 	case "y":
 		m.calMode = calModeYear
 		m.calTaskCursor = 0
 		m.calGridCursor = 0
-		return m, nil
+		m.calDayCenterNow = false
+		m.calWeekViewport = 0
+		return m, loadCalendarViewCmd(m.repo, m.calDate, m.calMode, false, m.uiSettings.weekStartsMonday())
 	case "t":
 		m.calDate = dateOnly(time.Now())
 		m.calTaskCursor = 0
 		m.calGridCursor = 0
+		if m.calMode == calModeDay {
+			m.calDayCenterNow = true
+		} else if m.calMode == calModeWeek {
+			m.calWeekViewport = -1
+		}
+		return m, loadCalendarViewCmd(m.repo, m.calDate, m.calMode, false, m.uiSettings.weekStartsMonday())
+	case "z", "Z":
+		if m.calMode != calModeWeek {
+			return m, nil
+		}
+		density := m.uiSettings.calendarWeekDensity().Toggle()
+		m.uiSettings.CalendarWeekDensity = density
+		m.calWeekViewport = 0
+		if err := saveUISettings(m.uiSettings); err != nil {
+			m.errMsg = "settings: " + err.Error()
+		} else {
+			m.toast = "week timeline " + density.Label()
+		}
+		return m, nil
+	case "pgdown", "ctrl+d":
+		if m.calMode == calModeWeek {
+			m.calWeekViewport = max(m.calWeekViewport, 0) + max(m.layout().innerLines/2, 5)
+		}
+		return m, nil
+	case "pgup", "ctrl+u":
+		if m.calMode == calModeWeek {
+			m.calWeekViewport = max(max(m.calWeekViewport, 0)-max(m.layout().innerLines/2, 5), 0)
+		}
 		return m, nil
 	case "enter":
-		return m.calDrillDown(), nil
+		out := m.calDrillDown()
+		return out, loadCalendarViewCmd(out.repo, out.calDate, out.calMode, false, out.uiSettings.weekStartsMonday())
 	case "[", "left":
-		return m.calNavPrev(), nil
+		out := m.calNavPrev()
+		return out, loadCalendarViewCmd(out.repo, out.calDate, out.calMode, false, out.uiSettings.weekStartsMonday())
 	case "]", "right":
-		return m.calNavNext(), nil
+		out := m.calNavNext()
+		return out, loadCalendarViewCmd(out.repo, out.calDate, out.calMode, false, out.uiSettings.weekStartsMonday())
 	case "h":
-		return m.calMoveHoriz(-1), nil
+		out := m.calMoveHoriz(-1)
+		return out, loadCalendarViewCmd(out.repo, out.calDate, out.calMode, false, out.uiSettings.weekStartsMonday())
 	case "l":
-		return m.calMoveHoriz(1), nil
+		out := m.calMoveHoriz(1)
+		return out, loadCalendarViewCmd(out.repo, out.calDate, out.calMode, false, out.uiSettings.weekStartsMonday())
 	case "j", "down":
-		return m.calMoveVert(1), nil
+		out := m.calMoveVert(1)
+		out.calDayCenterNow = false
+		if out.calMode == calModeWeek {
+			out.calWeekViewport = -2
+		}
+		return out, nil
 	case "k", "up":
-		return m.calMoveVert(-1), nil
+		out := m.calMoveVert(-1)
+		out.calDayCenterNow = false
+		if out.calMode == calModeWeek {
+			out.calWeekViewport = -2
+		}
+		return out, nil
 	}
 	return m, nil
 }
@@ -1775,6 +2581,7 @@ func (m model) updatePomoKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.pomoFollowNow = false
 			m.pomoGridCursor = nextPomoGridCursor(grid, m.pomoGridCursor, 1)
 			m.syncPomoCursorFromGrid(grid)
+			m.followPomoViewport(grid)
 		}
 		return m, nil
 	case "k", "up":
@@ -1782,6 +2589,23 @@ func (m model) updatePomoKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.pomoFollowNow = false
 			m.pomoGridCursor = nextPomoGridCursor(grid, m.pomoGridCursor, -1)
 			m.syncPomoCursorFromGrid(grid)
+			m.followPomoViewport(grid)
+		}
+		return m, nil
+	case "J":
+		if len(grid) > 0 {
+			m.pomoFollowNow = false
+			m.pomoGridCursor = nextSelectablePomoGridRow(grid, m.pomoGridCursor, 1)
+			m.syncPomoCursorFromGrid(grid)
+			m.followPomoViewport(grid)
+		}
+		return m, nil
+	case "K":
+		if len(grid) > 0 {
+			m.pomoFollowNow = false
+			m.pomoGridCursor = nextSelectablePomoGridRow(grid, m.pomoGridCursor, -1)
+			m.syncPomoCursorFromGrid(grid)
+			m.followPomoViewport(grid)
 		}
 		return m, nil
 	case "h", "left":
@@ -1835,7 +2659,33 @@ func (m model) updatePomoKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		return m, nil
 	case "D":
 		return m, focusDismissNotifyCmd()
+	case "+", "=":
+		m.uiSettings.PomoDailyGoal = min(m.uiSettings.pomoDailyGoal()+1, 999)
+		if err := saveUISettings(m.uiSettings); err != nil {
+			m.errMsg = "settings: " + err.Error()
+		} else {
+			m.toast = fmt.Sprintf("daily pomodoro goal · %d", m.uiSettings.PomoDailyGoal)
+		}
+		return m, nil
+	case "-":
+		m.uiSettings.PomoDailyGoal = max(m.uiSettings.pomoDailyGoal()-1, 1)
+		if err := saveUISettings(m.uiSettings); err != nil {
+			m.errMsg = "settings: " + err.Error()
+		} else {
+			m.toast = fmt.Sprintf("daily pomodoro goal · %d", m.uiSettings.PomoDailyGoal)
+		}
+		return m, nil
+	case "v", "V":
+		design := m.pomoFocusDesign().Next()
+		m.uiSettings.PomoFocusDesign = design
+		if err := saveUISettings(m.uiSettings); err != nil {
+			m.errMsg = "settings: " + err.Error()
+		} else {
+			m.toast = pomoFocusDesignToast(design)
+		}
+		return m, nil
 	case "z", "Z":
+		anchorHour := m.pomoVisibleAnchorHour(grid)
 		d := m.pomoTimelineDensity().Toggle()
 		m.uiSettings.PomoTimelineDensity = d
 		if err := saveUISettings(m.uiSettings); err != nil {
@@ -1843,8 +2693,14 @@ func (m model) updatePomoKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		} else {
 			m.toast = "timeline " + d.Label()
 		}
-		m.centerPomoTimelineOnNow()
-		m.syncPomoGridCursor()
+		if m.pomoFollowNow {
+			m.centerPomoTimelineOnNow()
+		} else {
+			newGrid := m.pomoDayGrid()
+			m.pomoViewport = gridRowForHour(newGrid, anchorHour)
+			m.pomoGridCursor = clamp(m.pomoGridCursor, 0, max(len(newGrid)-1, 0))
+			m.followPomoViewport(newGrid)
+		}
 		return m, nil
 	}
 	return m, nil
@@ -1897,7 +2753,15 @@ func (m model) selectedPomoRecord() (ticktick.FocusRecord, bool) {
 	if len(recs) == 0 || m.pomoCursor < 0 || m.pomoCursor >= len(recs) {
 		return ticktick.FocusRecord{}, false
 	}
-	return recs[m.pomoCursor], true
+	grid := m.pomoDayGrid()
+	if m.pomoGridCursor < 0 || m.pomoGridCursor >= len(grid) {
+		return ticktick.FocusRecord{}, false
+	}
+	row := grid[m.pomoGridCursor]
+	if row.kind != "pomo" || row.recIdx < 0 || row.recIdx >= len(recs) {
+		return ticktick.FocusRecord{}, false
+	}
+	return recs[row.recIdx], true
 }
 
 func (m model) openFocusPicker(defaultMinutes int) (model, tea.Cmd) {
@@ -1911,7 +2775,7 @@ func (m model) openFocusPicker(defaultMinutes int) (model, tea.Cmd) {
 	m.focusPickerEditDuration = false
 	m.focusPickerDurationBuf = ""
 	m.focusPickerFilter = ""
-	return m, loadFocusPickerCmd(m.client)
+	return m, loadFocusPickerCmd(m.repo)
 }
 
 func (m model) tryOpenFocusPickerSwitch() (model, tea.Cmd, bool) {
@@ -1933,7 +2797,7 @@ func (m model) openFocusPickerSwitch() (model, tea.Cmd) {
 	m.focusPickerEditDuration = false
 	m.focusPickerDurationBuf = ""
 	m.focusPickerFilter = ""
-	return m, loadFocusPickerCmd(m.client)
+	return m, loadFocusPickerCmd(m.repo)
 }
 
 func (m model) tryRepeatFocusSession() (model, tea.Cmd, bool) {
@@ -2259,7 +3123,15 @@ func (m model) taskCounts() (open, done, trashed int) {
 }
 
 func (m model) visibleTaskRows() []taskListRow {
-	return buildVisibleTaskRows(m.tasks, m.taskSortMode, m.showCompleted, m.showDeleted, m.filterInput.Value())
+	if m.effectiveTaskScope() == TaskScopeArchive {
+		return m.archiveTaskRows()
+	}
+	return buildVisibleTaskRowsForScope(
+		m.tasks,
+		m.taskSortMode,
+		m.effectiveTaskScope(),
+		m.filterInput.Value(),
+	)
 }
 
 func (m model) visibleTasks() []ticktick.Task {
@@ -2306,7 +3178,7 @@ func (m model) loadCurrentList() tea.Cmd {
 	if !ok {
 		return nil
 	}
-	return loadTasksCmd(m.client, row.node.ID, row.node.Name)
+	return loadTasksCmd(m.repo, row.node.ID, row.node.Name, false)
 }
 
 func buildListRows(tree []ticktick.ProjectTreeNode) []listRow {

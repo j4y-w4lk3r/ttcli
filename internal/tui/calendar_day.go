@@ -7,65 +7,118 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/j4y-w4lk3r/ttcli/internal/focus"
+	"github.com/j4y-w4lk3r/ttcli/internal/planning"
 	"github.com/j4y-w4lk3r/ttcli/internal/ticktick"
 )
 
+const calendarHourStep = 1
+
 type calDayRow struct {
-	hourLabel     string
-	kind          string // overdue-hdr, overdue, allday-hdr, allday, slot, task, now
-	slotBusy      bool
-	slotSummary   slotSummary
-	slotIndex     int
-	slotCount     int
-	taskIdx       int
-	task          ticktick.Task
+	hourLabel   string
+	kind        string // section headers, overdue, allday, slot, task, done, now
+	slotBusy    bool
+	slotSummary slotSummary
+	slotIndex   int
+	slotCount   int
+	taskIdx     int
+	entry       calEntry
+	estimate    planning.TaskEstimate
+	start       time.Time
+	end         time.Time
+	logged      bool
 }
 
-func (idx calIndex) onSorted(d time.Time) []ticktick.Task {
-	tasks := append([]ticktick.Task(nil), idx.on(d)...)
-	sortTasksByDue(tasks)
-	return tasks
+func (idx calIndex) onSorted(d time.Time) []calEntry {
+	entries := append([]calEntry(nil), idx.on(d)...)
+	sort.SliceStable(entries, func(i, j int) bool {
+		a, b := entries[i].Task, entries[j].Task
+		if a.DueDate != b.DueDate {
+			return a.DueDate < b.DueDate
+		}
+		if entries[i].Done() != entries[j].Done() {
+			return !entries[i].Done()
+		}
+		return a.Title < b.Title
+	})
+	return entries
 }
 
-func (idx calIndex) overdueBefore(d time.Time) []ticktick.Task {
+func (idx calIndex) overdueBefore(d time.Time) []calEntry {
 	key := dateKey(d)
-	var out []ticktick.Task
-	for k, ts := range idx.byDate {
+	var out []calEntry
+	for k, entries := range idx.byDate {
 		if k < key {
-			out = append(out, ts...)
+			for _, entry := range entries {
+				if !entry.Done() {
+					out = append(out, entry)
+				}
+			}
 		}
 	}
-	sortTasksByDue(out)
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].Task.DueDate < out[j].Task.DueDate
+	})
 	return out
 }
 
-func (m model) calDayRows(idx calIndex) (rows []calDayRow, tasks []ticktick.Task) {
+func (m model) calDayRows(idx calIndex) (rows []calDayRow, entries []calEntry) {
 	d := m.calSelected()
 	now := time.Now()
 	isToday := dateKey(d) == dateKey(now)
+	config := m.uiSettings.planningConfig()
 
-	var overdue []ticktick.Task
-	if isToday {
+	var overdue []calEntry
+	if isToday && m.uiSettings.CalendarDayShowOverdue {
 		overdue = idx.overdueBefore(d)
 	}
-	dayTasks := idx.onSorted(d)
-	tasks = append(append([]ticktick.Task(nil), overdue...), dayTasks...)
-
-	taskIdx := 0
-	if len(overdue) > 0 {
-		rows = append(rows, calDayRow{kind: "overdue-hdr"})
-		for _, t := range overdue {
-			rows = append(rows, calDayRow{kind: "overdue", taskIdx: taskIdx, task: t})
-			taskIdx++
+	dayEntries := idx.onSorted(d)
+	var allDay, scheduled, done []calEntry
+	for _, entry := range dayEntries {
+		switch {
+		case entry.Done():
+			done = append(done, entry)
+		case entry.Task.IsAllDay || !hasDueTime(entry.Task.DueDate):
+			allDay = append(allDay, entry)
+		default:
+			scheduled = append(scheduled, entry)
 		}
 	}
 
-	rows = append(rows, buildCalDayTimeline(dayTasks, d, now, taskIdx)...)
-	return rows, tasks
+	appendSection := func(kind string, section []calEntry) {
+		if len(section) == 0 {
+			return
+		}
+		rows = append(rows, calDayRow{kind: kind + "-hdr", slotCount: len(section)})
+		for _, entry := range section {
+			taskIdx := len(entries)
+			entries = append(entries, entry)
+			rows = append(rows, calDayRow{
+				kind:     kind,
+				taskIdx:  taskIdx,
+				entry:    entry,
+				estimate: planning.EstimateTask(entry.Task, config),
+			})
+		}
+	}
+
+	appendSection("allday", allDay)
+	if len(overdue) > 0 {
+		appendSection("overdue", overdue)
+	}
+	logged := visibleLoggedSpans(idx, m.calFocusByDate[dateKey(d)], scheduled, d, config)
+	rows = append(rows, calDayRow{kind: "schedule-hdr", slotCount: len(scheduled) + len(logged)})
+	scheduledBase := len(entries)
+	entries = append(entries, scheduled...)
+	rows = append(rows, buildCalDayTimelineWithLogged(scheduled, logged, d, now, scheduledBase, config)...)
+	appendSection("done", done)
+	return rows, entries
 }
 
-func calDayHourRange(bySlot map[int]int, day, now time.Time) (first, last int) {
-	first, last = 24, -1
+func calDayHourRange(bySlot map[int]int, day, now time.Time, config planning.Config) (first, last int) {
+	config = config.Normalized()
+	first = config.WorkStartMinutes / 60
+	last = (config.WorkEndMinutes + 59) / 60
 	for slot, n := range bySlot {
 		if n <= 0 {
 			continue
@@ -73,85 +126,99 @@ func calDayHourRange(bySlot map[int]int, day, now time.Time) (first, last int) {
 		if slot < first {
 			first = slot
 		}
-		if slot > last {
-			last = slot
+		if slot+1 > last {
+			last = slot + 1
 		}
 	}
-	isToday := dateKey(day) == dateKey(now)
-	nowSlot := (now.Hour() / dayHourStep) * dayHourStep
-	if isToday {
-		if last < 0 {
-			first = nowSlot
-			last = nowSlot
-		} else {
-			if nowSlot < first {
-				first = nowSlot
-			}
-			if nowSlot > last {
-				last = nowSlot
-			}
+	if dateKey(day) == dateKey(now) {
+		if now.Hour() < first {
+			first = now.Hour()
 		}
-	}
-	if last < 0 {
-		first = 8
-		last = 18
-	} else {
-		first -= dayHourStep
-		last += dayHourStep
+		if now.Hour() > last {
+			last = now.Hour()
+		}
 	}
 	if first < 0 {
 		first = 0
 	}
-	if last > 24-dayHourStep {
-		last = 24 - dayHourStep
+	if last > 23 {
+		last = 23
+	}
+	if last < first {
+		last = first
 	}
 	return first, last
 }
 
-func buildCalDayTimeline(dayTasks []ticktick.Task, day, now time.Time, taskIdxBase int) []calDayRow {
-	type indexed struct {
-		idx  int
-		task ticktick.Task
-		t    time.Time
-		kind string
+func calTaskSchedule(entry calEntry, config planning.Config) (planning.TaskEstimate, time.Time, time.Time) {
+	estimate := planning.EstimateTask(entry.Task, config)
+	due, ok := parseDueTime(entry.Task.DueDate)
+	if !ok {
+		return estimate, time.Time{}, time.Time{}
 	}
-	const dateOnlySlot = (9 / dayHourStep) * dayHourStep // 08:00 rail when step=2
-	bySlot := map[int][]indexed{}
-	for i, t := range dayTasks {
-		kind := "task"
-		slot := dateOnlySlot
-		if t.IsAllDay || !hasDueTime(t.DueDate) {
-			kind = "allday"
-		} else {
-			due, ok := parseDueTime(t.DueDate)
-			if !ok {
-				continue
-			}
-			slot = (due.Hour() / dayHourStep) * dayHourStep
-			if slot > 24-dayHourStep {
-				slot = 24 - dayHourStep
-			}
+	if estimate.Explicit {
+		if start, ok := parseDueTime(entry.Task.StartDate); ok && due.After(start) {
+			return estimate, start, due
 		}
+	}
+	return estimate, due, time.Time{}
+}
+
+func buildCalDayTimeline(dayEntries []calEntry, day, now time.Time, taskIdxBase int, config planning.Config) []calDayRow {
+	return buildCalDayTimelineWithLogged(dayEntries, nil, day, now, taskIdxBase, config)
+}
+
+func buildCalDayTimelineWithLogged(
+	dayEntries []calEntry,
+	logged []calLoggedSpan,
+	day, now time.Time,
+	taskIdxBase int,
+	config planning.Config,
+) []calDayRow {
+	type indexed struct {
+		idx      int
+		entry    calEntry
+		estimate planning.TaskEstimate
+		start    time.Time
+		end      time.Time
+		logged   bool
+	}
+	bySlot := map[int][]indexed{}
+	for i, entry := range dayEntries {
+		estimate, start, end := calTaskSchedule(entry, config)
+		if start.IsZero() {
+			continue
+		}
+		slot := start.Hour()
 		bySlot[slot] = append(bySlot[slot], indexed{
-			idx:  taskIdxBase + i,
-			task: t,
-			kind: kind,
+			idx:      taskIdxBase + i,
+			entry:    entry,
+			estimate: estimate,
+			start:    start,
+			end:      end,
+		})
+	}
+	for _, span := range logged {
+		if span.Start.IsZero() {
+			continue
+		}
+		slot := span.Start.Hour()
+		bySlot[slot] = append(bySlot[slot], indexed{
+			idx:      -1,
+			entry:    span.Entry,
+			estimate: span.Estimate,
+			start:    span.Start,
+			end:      span.End,
+			logged:   true,
 		})
 	}
 	for slot := range bySlot {
 		sort.Slice(bySlot[slot], func(a, b int) bool {
 			ai, bi := bySlot[slot][a], bySlot[slot][b]
-			if ai.kind != bi.kind {
-				return ai.kind == "allday"
+			if !ai.start.Equal(bi.start) {
+				return ai.start.Before(bi.start)
 			}
-			if ai.kind == "task" && bi.kind == "task" {
-				da, oka := parseDueTime(ai.task.DueDate)
-				db, okb := parseDueTime(bi.task.DueDate)
-				if oka && okb && !da.Equal(db) {
-					return da.Before(db)
-				}
-			}
-			return ai.task.Title < bi.task.Title
+			return ai.entry.Task.Title < bi.entry.Task.Title
 		})
 	}
 
@@ -161,22 +228,34 @@ func buildCalDayTimeline(dayTasks []ticktick.Task, day, now time.Time, taskIdxBa
 	}
 
 	isToday := dateKey(day) == dateKey(now)
-	nowSlot := (now.Hour() / dayHourStep) * dayHourStep
-	firstHour, lastHour := calDayHourRange(slotCounts, day, now)
+	nowSlot := now.Hour()
+	firstHour, lastHour := calDayHourRange(slotCounts, day, now, config)
 	var rows []calDayRow
 	nowPlaced := false
 
-	for hour := firstHour; hour <= lastHour; hour += dayHourStep {
+	for hour := firstHour; hour <= lastHour; hour += calendarHourStep {
 		label := fmt.Sprintf("%02d:00", hour)
 		items := bySlot[hour]
-		sum := slotSummary{sessions: len(items)}
+		sum := slotSummary{sessions: len(items), capacityMins: 60}
+		for _, item := range items {
+			sum.mins += item.estimate.Minutes
+		}
 		busy := len(items) > 0 || (isToday && nowSlot == hour)
 		rows = append(rows, calDayRow{hourLabel: label, kind: "slot", slotBusy: busy, slotSummary: sum})
 		for j, item := range items {
+			if isToday && !nowPlaced && nowSlot == hour && now.Before(item.start) {
+				rows = append(rows, calDayRow{kind: "now"})
+				nowPlaced = true
+			}
 			rows = append(rows, calDayRow{
-				kind:      item.kind,
+				hourLabel: item.start.Format("15:04"),
+				kind:      "task",
 				taskIdx:   item.idx,
-				task:      item.task,
+				entry:     item.entry,
+				estimate:  item.estimate,
+				start:     item.start,
+				end:       item.end,
+				logged:    item.logged,
 				slotIndex: j,
 				slotCount: len(items),
 			})
@@ -195,18 +274,34 @@ func buildCalDayTimeline(dayTasks []ticktick.Task, day, now time.Time, taskIdxBa
 func renderCalDayGridRow(row calDayRow, day, now time.Time, selected bool, width int) string {
 	switch row.kind {
 	case "overdue-hdr":
-		return truncateInner(sectionHeader("Overdue", width), width)
+		return truncateInner(sectionHeader(fmt.Sprintf("Overdue (%d)", row.slotCount), width), width)
 	case "allday-hdr":
-		return truncateInner(sectionHeader("All day", width), width)
+		return truncateInner(sectionHeader(fmt.Sprintf("All day (%d)", row.slotCount), width), width)
+	case "schedule-hdr":
+		title := "Schedule"
+		if row.slotCount > 0 {
+			title = fmt.Sprintf("Schedule (%d)", row.slotCount)
+		}
+		return truncateInner(sectionHeader(title, width), width)
+	case "done-hdr":
+		return truncateInner(sectionHeader(fmt.Sprintf("Done (%d)", row.slotCount), width), width)
 	case "slot":
 		return renderDaySlotRow(row.hourLabel, row.slotBusy, width, row.slotSummary)
 	case "now":
 		return renderDayNowRow(now.Format("15:04"), width)
-	case "overdue", "allday", "task":
+	case "overdue", "allday", "task", "done":
 		return renderCalTaskRow(row, day, now, selected, width)
 	default:
 		return ""
 	}
+}
+
+func calendarEstimateLabel(estimate planning.TaskEstimate) string {
+	label := planning.FormatMinutes(estimate.Minutes)
+	if !estimate.Explicit {
+		label = "~" + label
+	}
+	return label
 }
 
 func taskPriorityColor(priority int) lipgloss.Color {
@@ -223,16 +318,21 @@ func taskPriorityColor(priority int) lipgloss.Color {
 }
 
 func renderCalTaskRow(row calDayRow, day, now time.Time, selected bool, width int) string {
-	t := row.task
-	overdue := calTaskShouldBeDone(t, day, now) || row.kind == "overdue"
+	entry := row.entry
+	t := entry.Task
+	overdue := !entry.Done() && (calTaskIsPastDue(t, day, now) || row.kind == "overdue")
 
 	titleSt := listIdleStyle
-	if overdue {
+	if entry.Done() {
+		titleSt = taskDoneStyle
+	} else if overdue {
 		titleSt = dueOverStyle
 	}
 	if selected {
 		titleSt = taskSelStyle
-		if overdue {
+		if entry.Done() {
+			titleSt = taskDoneStyle.Bold(true)
+		} else if overdue {
 			titleSt = dueOverStyle.Bold(true)
 		}
 	}
@@ -242,37 +342,88 @@ func renderCalTaskRow(row calDayRow, day, now time.Time, selected bool, width in
 		title = "(untitled)"
 	}
 	dot := lipgloss.NewStyle().Foreground(taskPriorityColor(t.Priority.Int())).Render("●")
+	marker := iconTaskOpen
+	if row.logged {
+		marker = iconPomodoro
+	} else if entry.Done() {
+		marker = iconCheck
+	} else if entry.State == calEntryPending {
+		marker = iconRefresh
+	}
+	if selected {
+		marker = iconTaskSel
+	}
+	local := ""
+	if entry.LocalOnly() {
+		local = " " + hintStyle.Render("local")
+	}
 
 	switch row.kind {
 	case "allday":
-		conn := dayPomoConnector(row.slotIndex, row.slotCount, selected)
-		marker := iconTaskOpen
-		if selected {
-			marker = iconTaskSel
-		}
-		body := conn + " " + dot + " " + calAllDayStyle.Render("all day") + "  " + titleSt.Render(marker+" "+title)
-		return renderDayTimelineEntryBody("", body, "", width, pomoTimelineLayout{})
+		prefix := dayItemPrefix(selected)
+		body := prefix + dot + " " + titleSt.Render(marker+" "+title) + local
+		return renderDayTimelineEntryBody("", body, hintStyle.Render(calendarEstimateLabel(row.estimate)), width, pomoTimelineLayout{})
 	case "overdue":
-		marker := iconOverdueDot
+		if !entry.Done() {
+			marker = iconOverdueDot
+		}
 		if selected {
 			marker = iconTaskSel
 		}
 		prefix := dayItemPrefix(selected)
-		body := prefix + titleSt.Render(marker+" "+title)
-		return renderDayTimelineEntryBody("", body, dueInline(t.DueDate), width, pomoTimelineLayout{})
-	default:
-		clock := dueTaskClock(t)
-		conn := dayPomoConnector(row.slotIndex, row.slotCount, selected)
-		marker := iconTaskOpen
-		if selected {
-			marker = iconTaskSel
+		body := prefix + titleSt.Render(marker+" "+title) + local
+		suffix := dueInline(t.DueDate)
+		if estimate := calendarEstimateLabel(row.estimate); estimate != "" {
+			suffix += " · " + estimate
 		}
-		body := conn + " " + dot + " " + titleSt.Render(marker + " " + title)
+		return renderDayTimelineEntryBody("", body, hintStyle.Render(suffix), width, pomoTimelineLayout{})
+	case "done":
+		prefix := dayItemPrefix(selected)
+		body := prefix + titleSt.Render(marker+" "+title) + local
+		return renderDayTimelineEntryBody("", body, "", width, pomoTimelineLayout{})
+	default:
+		clock := row.hourLabel
+		conn := dayPomoConnector(row.slotIndex, row.slotCount, selected)
+		body := conn + " " + dot + " " + titleSt.Render(marker+" "+title) + local
 		if p := t.PriorityLabel(); p != "-" {
 			body += " " + prioStyle(p).Render(p)
 		}
-		return renderDayTimelineEntryBody(clock, body, "", width, pomoTimelineLayout{})
+		suffix := calendarEstimateLabel(row.estimate)
+		if row.logged {
+			if !row.end.IsZero() {
+				suffix = row.end.Format("15:04") + " · " + suffix + " logged"
+			} else {
+				suffix = suffix + " logged"
+			}
+		} else if !row.end.IsZero() {
+			suffix = row.end.Format("15:04") + " · " + suffix
+		} else {
+			suffix = "due · " + suffix
+		}
+		return renderDayTimelineEntryBody(clock, body, hintStyle.Render(suffix), width, pomoTimelineLayout{})
 	}
+}
+
+func renderCalDayTaskContinuation(row calDayRow, selected, last bool, width int) string {
+	style := listIdleStyle
+	if selected {
+		style = taskSelStyle
+	}
+	border := "│"
+	detail := calendarEstimateLabel(row.estimate) + " planned"
+	if row.logged {
+		detail = calendarEstimateLabel(row.estimate) + " logged"
+	}
+	if last {
+		border = "╰─"
+		if !row.end.IsZero() {
+			detail = "ends " + row.end.Format("15:04")
+		}
+	}
+	rail := lipgloss.NewStyle().
+		Foreground(taskPriorityColor(row.entry.Task.Priority.Int())).
+		Render(border)
+	return renderDayTimelineEntryBody("", "  "+rail+" "+style.Render(detail), "", width, pomoTimelineLayout{})
 }
 
 func (m *model) syncCalTaskFromGrid(rows []calDayRow) {
@@ -281,20 +432,86 @@ func (m *model) syncCalTaskFromGrid(rows []calDayRow) {
 	}
 	row := rows[m.calGridCursor]
 	switch row.kind {
-	case "overdue", "allday", "task":
+	case "overdue", "allday", "task", "done":
 		m.calTaskCursor = row.taskIdx
 	}
 }
 
-func calDaySummary(tasks, overdue []ticktick.Task, day time.Time, now time.Time) string {
-	planned := len(tasks)
+func calDayRowSelectable(row calDayRow) bool {
+	switch row.kind {
+	case "overdue", "allday", "task", "done":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeCalDayGridCursor(rows []calDayRow, cursor int) int {
+	if len(rows) == 0 {
+		return 0
+	}
+	cursor = clamp(cursor, 0, len(rows)-1)
+	if calDayRowSelectable(rows[cursor]) {
+		return cursor
+	}
+	for i := cursor + 1; i < len(rows); i++ {
+		if calDayRowSelectable(rows[i]) {
+			return i
+		}
+	}
+	for i := cursor - 1; i >= 0; i-- {
+		if calDayRowSelectable(rows[i]) {
+			return i
+		}
+	}
+	return cursor
+}
+
+func moveCalDayGridCursor(rows []calDayRow, cursor, delta int) int {
+	if len(rows) == 0 || delta == 0 {
+		return normalizeCalDayGridCursor(rows, cursor)
+	}
+	cursor = normalizeCalDayGridCursor(rows, cursor)
+	step := 1
+	if delta < 0 {
+		step = -1
+	}
+	steps := delta
+	if steps < 0 {
+		steps = -steps
+	}
+	for moved := 0; moved < steps; {
+		next := cursor + step
+		for next >= 0 && next < len(rows) && !calDayRowSelectable(rows[next]) {
+			next += step
+		}
+		if next < 0 || next >= len(rows) {
+			break
+		}
+		cursor = next
+		moved++
+	}
+	return cursor
+}
+
+func calDaySummary(entries, overdue []calEntry, day time.Time, now time.Time) string {
+	planned := 0
+	done := 0
 	doneByNow := 0
-	for _, t := range tasks {
-		if calTaskShouldBeDone(t, day, now) {
+	for _, entry := range entries {
+		if entry.Done() {
+			done++
+			continue
+		}
+		planned++
+		if calTaskIsPastDue(entry.Task, day, now) {
 			doneByNow++
 		}
 	}
 	parts := []string{fmt.Sprintf("%d planned", planned)}
+	if done > 0 {
+		parts = append(parts, fmt.Sprintf("%d done", done))
+	}
 	if len(overdue) > 0 {
 		parts = append(parts, fmt.Sprintf("%d overdue", len(overdue)))
 	}
@@ -302,4 +519,130 @@ func calDaySummary(tasks, overdue []ticktick.Task, day time.Time, now time.Time)
 		parts = append(parts, fmt.Sprintf("%d past due today", doneByNow))
 	}
 	return strings.Join(parts, " · ")
+}
+
+func buildCalDayPlan(idx calIndex, day, now time.Time, config planning.Config) planning.DayPlan {
+	var inputs []planning.TaskInput
+	for _, entry := range idx.onSorted(day) {
+		if !entry.Done() {
+			inputs = append(inputs, planning.TaskInput{Task: entry.Task})
+		}
+	}
+	if dateKey(day) == dateKey(now) {
+		for _, entry := range idx.overdueBefore(day) {
+			inputs = append(inputs, planning.TaskInput{Task: entry.Task, Overdue: true})
+		}
+	}
+	return planning.BuildDayPlan(day, now, inputs, config)
+}
+
+func (m model) buildCalDayCoaching(idx calIndex, day, now time.Time) planning.DayPlan {
+	entries := append([]calEntry(nil), idx.onSorted(day)...)
+	if dateKey(day) == dateKey(now) {
+		entries = append(idx.overdueBefore(day), entries...)
+	}
+	stats := m.calFocusByDate[dateKey(day)]
+	focusByID := map[string]ticktick.TaskFocusSummary{}
+	focusByTitle := map[string]ticktick.TaskFocusSummary{}
+	totalMinutes, totalPomos := 0, 0
+	if stats != nil {
+		focusIndex := ticktick.AggregateTaskFocus(stats.Records)
+		focusByID, focusByTitle = focusIndex.ByID, focusIndex.ByTitle
+		for _, record := range stats.Records {
+			totalMinutes += int(ticktick.RecordDuration(record).Minutes() + 0.5)
+		}
+		totalPomos = ticktick.CountFullPomos(stats.Records)
+	}
+
+	titleCounts := make(map[string]int)
+	for _, entry := range entries {
+		titleCounts[ticktick.NormalizeFocusTaskTitle(entry.Task.Title)]++
+	}
+	usedFocus := make(map[string]bool)
+	assignedMinutes, assignedPomos := 0, 0
+	inputs := make([]planning.TaskInput, 0, len(entries))
+	for _, entry := range entries {
+		taskInput := planning.TaskInput{
+			Task: entry.Task, Done: entry.Done(),
+			Overdue: entry.Date.Before(dateOnly(day)),
+		}
+		focusKey := ""
+		summary, found := focusByID[entry.Task.ID]
+		if found {
+			focusKey = "id:" + entry.Task.ID
+		} else if seriesID := entry.Task.SeriesID(); seriesID != entry.Task.ID {
+			summary, found = focusByID[seriesID]
+			if found {
+				focusKey = "id:" + seriesID
+			}
+		}
+		if !found {
+			titleKey := ticktick.NormalizeFocusTaskTitle(entry.Task.Title)
+			if titleKey != "" && titleCounts[titleKey] == 1 {
+				summary, found = focusByTitle[titleKey]
+				if found {
+					focusKey = "title:" + titleKey
+				}
+			}
+		}
+		if found && !usedFocus[focusKey] {
+			taskInput.LoggedMinutes = int((summary.TotalSeconds + 30) / 60)
+			taskInput.LoggedPomos = summary.FullSessions
+			assignedMinutes += taskInput.LoggedMinutes
+			assignedPomos += taskInput.LoggedPomos
+			usedFocus[focusKey] = true
+		}
+		inputs = append(inputs, taskInput)
+	}
+
+	activeMinutes, activeTaskID := 0, ""
+	if dateKey(day) == dateKey(now) {
+		if session, err := focus.Load(); err == nil && session.Active() &&
+			dateKey(session.StartedAt) == dateKey(day) {
+			elapsed := session.CurrentSegmentElapsed()
+			if session.PlannedLogged {
+				elapsed = session.OvertimeElapsed()
+			}
+			activeMinutes = int(elapsed.Minutes())
+			activeTaskID = session.TaskID
+		}
+	}
+	return planning.BuildCoachingPlan(planning.CoachingInput{
+		Day: day, Now: now, Tasks: inputs,
+		UnassignedLoggedMinutes: max(totalMinutes-assignedMinutes, 0),
+		UnassignedLoggedPomos:   max(totalPomos-assignedPomos, 0),
+		ActiveMinutes:           activeMinutes,
+		ActiveTaskID:            activeTaskID,
+		Config:                  m.uiSettings.planningConfig(),
+	})
+}
+
+func renderCalDayPlanSummary(plan planning.DayPlan) string {
+	needed := planning.FormatMinutes(plan.NeededMinutes)
+	if plan.InferredTasks > 0 {
+		needed = "~" + needed
+	}
+	if plan.Historical {
+		return hintStyle.Render(needed + " planned · historical day")
+	}
+
+	label := strings.ToUpper(string(plan.Feasibility))
+	labelStyle := lipgloss.NewStyle().Foreground(colorGreen).Bold(true)
+	switch plan.Feasibility {
+	case planning.FeasibilityTight:
+		labelStyle = lipgloss.NewStyle().Foreground(colorPeach).Bold(true)
+	case planning.FeasibilityOverCapacity:
+		labelStyle = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
+	}
+	parts := []string{
+		needed + " needed",
+		planning.FormatMinutes(plan.AvailableMinutes) + " available",
+		labelStyle.Render(label),
+		string(plan.Evidence) + " evidence",
+	}
+	if plan.InferredTasks > 0 {
+		parts = append(parts, fmt.Sprintf("%d inferred", plan.InferredTasks))
+	}
+	return hintStyle.Render(strings.Join(parts[:2], " · ")) +
+		" · " + strings.Join([]string{parts[2], hintStyle.Render(strings.Join(parts[3:], " · "))}, " · ")
 }

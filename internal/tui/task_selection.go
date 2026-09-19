@@ -171,7 +171,7 @@ func (m model) markedTasksHint() string {
 		return ""
 	}
 	if n == 1 {
-		return "1 marked · d done · m move · x delete · u clear"
+		return "1 marked · d done · m move · Backspace delete · u clear"
 	}
-	return fmt.Sprintf("%d marked · d done · m move · x delete · u clear", n)
+	return fmt.Sprintf("%d marked · d done · m move · Backspace delete · u clear", n)
 }

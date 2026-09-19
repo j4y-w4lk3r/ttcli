@@ -38,7 +38,7 @@ func (m model) openAddPomoForm() (model, tea.Cmd) {
 	m.addPomoStartUnset = dateKey(m.addPomoLogDate) == dateKey(now)
 	m.addPomoPauseInput.SetValue("")
 	m.blurAddPomoInputs()
-	return m, loadFocusPickerCmd(m.client)
+	return m, loadFocusPickerCmd(m.repo)
 }
 
 func (m *model) blurAddPomoInputs() {
