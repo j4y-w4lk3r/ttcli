@@ -212,6 +212,11 @@ func (m model) syncFocusSession(sess *focus.Session) model {
 func (m model) handleFocusTick() (model, tea.Cmd) {
 	var cmds []tea.Cmd
 	cmds = append(cmds, tickCmd())
+	var reminderCmd tea.Cmd
+	m, reminderCmd = m.armReminderScan(time.Now())
+	if reminderCmd != nil {
+		cmds = append(cmds, reminderCmd)
+	}
 	sess, err := focus.Load()
 	if err != nil {
 		sessionlog.Appendf("focus_tick", "load err=%v", err)

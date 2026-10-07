@@ -222,6 +222,7 @@ func moveTasksGroupedCmd(c *ticktick.Client, tasks []ticktick.Task, destProjectI
 			return taskMovedMsg{destID: destProjectID, destName: destName, err: fmt.Errorf("not connected")}
 		}
 		moved := 0
+		var movedTasks []ticktick.Task
 		var lastErr error
 		for projectID, taskIDs := range groupTasksByProject(tasks, "") {
 			if !realListID(projectID) {
@@ -229,21 +230,79 @@ func moveTasksGroupedCmd(c *ticktick.Client, tasks []ticktick.Task, destProjectI
 				continue
 			}
 			n, err := c.MoveTasks(taskIDs, projectID, destProjectID)
-			moved += n
+			if n > 0 {
+				moved += n
+				movedTasks = append(movedTasks, tasksWithIDs(tasks, taskIDs)...)
+			}
 			if err != nil {
 				lastErr = err
 			}
 		}
+		msg := taskMovedMsg{
+			destID: destProjectID, destName: destName, count: moved, err: lastErr,
+			nextUndo: &taskUndo{op: undoMoveBack, tasks: movedTasks, fromProject: destProjectID, destName: destName},
+		}
+		if len(movedTasks) == 0 {
+			msg.nextUndo = nil
+		}
 		if moved == 0 && lastErr != nil {
 			sessionlog.Appendf("task_move_fail", "to=%s err=%v", destName, lastErr)
-			return taskMovedMsg{destID: destProjectID, destName: destName, err: lastErr}
+			return msg
 		}
 		if lastErr != nil {
 			sessionlog.Appendf("task_move_fail", "moved=%d to=%s err=%v", moved, destName, lastErr)
-			return taskMovedMsg{destID: destProjectID, destName: destName, count: moved, err: lastErr}
+			return msg
 		}
 		sessionlog.Appendf("task_move_ok", "count=%d to=%s", moved, destName)
-		return taskMovedMsg{destID: destProjectID, destName: destName, count: moved, err: nil}
+		return msg
+	}
+}
+
+func moveTasksBackCmd(c *ticktick.Client, tasks []ticktick.Task, fromProject, toastName, redoName string) tea.Cmd {
+	return func() tea.Msg {
+		if c == nil {
+			return taskMovedMsg{destName: toastName, err: fmt.Errorf("not connected")}
+		}
+		moved := 0
+		var back []ticktick.Task
+		var invalidate []string
+		seen := map[string]bool{}
+		var lastErr error
+		for sourceID, taskIDs := range groupTasksByProject(tasks, "") {
+			if !realListID(sourceID) || sourceID == fromProject {
+				lastErr = fmt.Errorf("task has no list")
+				continue
+			}
+			n, err := c.MoveTasks(taskIDs, fromProject, sourceID)
+			if n > 0 {
+				moved += n
+				back = append(back, tasksWithIDs(tasks, taskIDs)...)
+				if !seen[sourceID] {
+					seen[sourceID] = true
+					invalidate = append(invalidate, sourceID)
+				}
+			}
+			if err != nil {
+				lastErr = err
+			}
+		}
+		if fromProject != "" {
+			invalidate = append(invalidate, fromProject)
+		}
+		msg := taskMovedMsg{destName: toastName, count: moved, err: lastErr, invalidate: invalidate}
+		if len(back) > 0 && lastErr == nil {
+			msg.nextUndo = &taskUndo{op: undoMoveTo, tasks: back, toProject: fromProject, destName: redoName}
+		}
+		if moved == 0 && lastErr != nil {
+			sessionlog.Appendf("task_move_fail", "undo to=%s err=%v", toastName, lastErr)
+			return msg
+		}
+		if lastErr != nil {
+			sessionlog.Appendf("task_move_fail", "undo moved=%d to=%s err=%v", moved, toastName, lastErr)
+			return msg
+		}
+		sessionlog.Appendf("task_move_ok", "undo count=%d to=%s", moved, toastName)
+		return msg
 	}
 }
 

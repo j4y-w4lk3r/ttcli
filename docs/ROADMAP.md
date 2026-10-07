@@ -9,7 +9,8 @@
 | **3** | done | Pinned Completed, Won't Do, and Trash · list search · closed-list colors |
 | **4** | done | Undo a deleted list · a project's Done view excludes Won't Do |
 | **5** | done | `i` rewrites a task title and notes after a preview · Pushover on focus done · MCP tools |
-| **later** | planned | Mouse · Open API OAuth · KOReader · Pushover for task reminders |
+| **6** | done | Undo the last task action · focus counts stay on the task id · Pushover when a reminder is due |
+| **later** | planned | Open API OAuth · KOReader |
 
 Run: `ttcli tui`
 
@@ -23,7 +24,7 @@ Pushover is sent with the focus-finished desktop alert when `TTCLI_PUSHOVER_USER
 
 ### Pushover
 
-The focus-finished alert also goes to Pushover when credentials are set. Task reminders can use the same sender later.
+The focus-finished alert also goes to Pushover when credentials are set. While the TUI is open, a task reminder does the same: a desktop notification and a Pushover message when the reminder time arrives. A timed reminder fires at the due time minus its offset. An all-day reminder fires at 09:00 local, minus that offset. One that is already more than a few minutes late is left alone.
 
 ## API strategy: private web API vs official Open API
 

@@ -63,11 +63,11 @@ func focusInlineStart(line string) int {
 
 func TestTaskRowLayoutStableAcrossScrollWindows(t *testing.T) {
 	m := fixtureModel(120, 40)
-	m.taskFocusByTitle = map[string]ticktick.TaskFocusSummary{
-		ticktick.NormalizeFocusTaskTitle("The God Equation"): {
+	m.taskFocusByID = map[string]ticktick.TaskFocusSummary{
+		"god": {
 			FullSessions: 2, LoggedSessions: 2, TotalSeconds: 3000,
 		},
-		ticktick.NormalizeFocusTaskTitle("The Millionaire Fastlane"): {
+		"fast": {
 			FullSessions: 13, LoggedSessions: 13, TotalSeconds: 336*3600 + 43*60,
 		},
 	}
@@ -76,8 +76,8 @@ func TestTaskRowLayoutStableAcrossScrollWindows(t *testing.T) {
 		all = append(all, taskListRow{Task: ticktick.Task{Title: "Filler Book"}})
 	}
 	all = append(all,
-		taskListRow{Task: ticktick.Task{Title: "The God Equation"}},
-		taskListRow{Task: ticktick.Task{Title: "The Millionaire Fastlane"}},
+		taskListRow{Task: ticktick.Task{ID: "god", Title: "The God Equation"}},
+		taskListRow{Task: ticktick.Task{ID: "fast", Title: "The Millionaire Fastlane"}},
 	)
 
 	w := 80

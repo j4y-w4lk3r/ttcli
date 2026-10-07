@@ -66,7 +66,7 @@ var helpRows = []helpRow{
 	{"Space", "mark / unmark task for bulk actions", false},
 	{"a", "mark all visible open and done tasks", false},
 	{"A", "mark all visible completed tasks only", false},
-	{"u", "clear marked tasks", false},
+	{"u", "clear marks · or undo the last complete, Won't Do, move, or trash", false},
 	{"m", "move marked tasks or cursor task to another list (incl. done when shown)", false},
 	{"e", "edit task schedule · focus budget · recurrence · details", false},
 	{"i", "ask AI to rewrite the selected task title and notes", false},

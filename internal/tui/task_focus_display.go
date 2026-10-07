@@ -11,12 +11,10 @@ import (
 var taskFocusInlineStyle = lipgloss.NewStyle().Foreground(colorPeach).Bold(true)
 
 func (m model) taskFocusSummary(t ticktick.Task) (ticktick.TaskFocusSummary, bool) {
-	if s, ok := m.taskFocusByID[t.ID]; ok && s.Visible() {
-		return s, true
-	}
-	key := ticktick.NormalizeFocusTaskTitle(t.Title)
-	if key != "" {
-		if s, ok := m.taskFocusByTitle[key]; ok && s.Visible() {
+	// Sessions stay on the task id. A rename keeps them, and another task
+	// with the same title does not borrow the count.
+	if t.ID != "" {
+		if s, ok := m.taskFocusByID[t.ID]; ok && s.Visible() {
 			return s, true
 		}
 	}

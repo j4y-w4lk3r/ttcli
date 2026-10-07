@@ -14,6 +14,11 @@ type Project struct {
 	SortOrder int64  `json:"sortOrder"`
 }
 
+// ReminderTrigger is one TickTick reminder, relative to the due time.
+type ReminderTrigger struct {
+	Trigger string `json:"trigger,omitempty"`
+}
+
 // ChecklistItem is a subtask/checklist entry on a task.
 type ChecklistItem struct {
 	ID     string  `json:"id"`
@@ -40,30 +45,31 @@ type FocusSummary struct {
 //	status:   0 todo, 2 completed (-1 won't-do on some clients)
 //	deleted:  0 live, 1/2 trashed
 type Task struct {
-	ID              string          `json:"id"`
-	ProjectID       string          `json:"projectId"`
-	Title           string          `json:"title"`
-	Content         string          `json:"content"`
-	Desc            string          `json:"desc"`
-	Priority        flexInt         `json:"priority"`
-	Status          flexInt         `json:"status"`
-	Deleted         flexInt         `json:"deleted"`
-	DueDate         string          `json:"dueDate"`
-	StartDate       string          `json:"startDate"`
-	Reminder        string          `json:"reminder"`
-	Tags            []string        `json:"tags"`
-	SortOrder       int64           `json:"sortOrder"`
-	IsAllDay        bool            `json:"isAllDay"`
-	TimeZone        string          `json:"timeZone"`
-	CompletedT      string          `json:"completedTime"`
-	ParentID        string          `json:"parentId"`
-	ChildIDs        []string        `json:"childIds"`
-	Items           []ChecklistItem `json:"items"`
-	RepeatFlag      string          `json:"repeatFlag"`
-	RepeatFrom      flexInt         `json:"repeatFrom"`
-	RepeatFirstDate string          `json:"repeatFirstDate"`
-	RepeatTaskID    string          `json:"repeatTaskId"`
-	FocusSummaries  []FocusSummary  `json:"focusSummaries"`
+	ID              string            `json:"id"`
+	ProjectID       string            `json:"projectId"`
+	Title           string            `json:"title"`
+	Content         string            `json:"content"`
+	Desc            string            `json:"desc"`
+	Priority        flexInt           `json:"priority"`
+	Status          flexInt           `json:"status"`
+	Deleted         flexInt           `json:"deleted"`
+	DueDate         string            `json:"dueDate"`
+	StartDate       string            `json:"startDate"`
+	Reminder        string            `json:"reminder"`
+	Reminders       []ReminderTrigger `json:"reminders,omitempty"`
+	Tags            []string          `json:"tags"`
+	SortOrder       int64             `json:"sortOrder"`
+	IsAllDay        bool              `json:"isAllDay"`
+	TimeZone        string            `json:"timeZone"`
+	CompletedT      string            `json:"completedTime"`
+	ParentID        string            `json:"parentId"`
+	ChildIDs        []string          `json:"childIds"`
+	Items           []ChecklistItem   `json:"items"`
+	RepeatFlag      string            `json:"repeatFlag"`
+	RepeatFrom      flexInt           `json:"repeatFrom"`
+	RepeatFirstDate string            `json:"repeatFirstDate"`
+	RepeatTaskID    string            `json:"repeatTaskId"`
+	FocusSummaries  []FocusSummary    `json:"focusSummaries"`
 }
 
 // IsSubtask reports whether this task is a child of another task.

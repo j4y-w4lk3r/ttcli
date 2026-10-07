@@ -43,10 +43,10 @@ func TestTaskScrollSubtasksFrameIntegrity(t *testing.T) {
 	m.paneFocus = paneTasks
 	m.projectName = "Home"
 	m.tasks = tasks
-	m.taskFocusByTitle = map[string]ticktick.TaskFocusSummary{
-		ticktick.NormalizeFocusTaskTitle("su ISP"):   {FullSessions: 1, LoggedSessions: 1, TotalSeconds: 1500},
-		ticktick.NormalizeFocusTaskTitle("garbage"):  {FullSessions: 4, LoggedSessions: 4, TotalSeconds: 6000},
-		ticktick.NormalizeFocusTaskTitle("cleaning"): {FullSessions: 9, LoggedSessions: 9, TotalSeconds: 13500},
+	m.taskFocusByID = map[string]ticktick.TaskFocusSummary{
+		"c2": {FullSessions: 1, LoggedSessions: 1, TotalSeconds: 1500},
+		"g1": {FullSessions: 4, LoggedSessions: 4, TotalSeconds: 6000},
+		"g2": {FullSessions: 9, LoggedSessions: 9, TotalSeconds: 13500},
 	}
 	for i := 0; i < 60; i++ {
 		m = pressKey(m, "j")

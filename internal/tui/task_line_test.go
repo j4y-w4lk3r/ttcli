@@ -10,13 +10,13 @@ import (
 
 func TestFormatTaskLineKeepsShortTitleWithFocusColumn(t *testing.T) {
 	m := fixtureModel(120, 40)
-	m.taskFocusByTitle = map[string]ticktick.TaskFocusSummary{
+	m.taskFocusByID = map[string]ticktick.TaskFocusSummary{
 		"garbage": {FullSessions: 4, LoggedSessions: 4, TotalSeconds: 6000},
 	}
 	w := 80
 	rows := []taskListRow{
 		{Task: ticktick.Task{Title: "One Time Setup"}},
-		{Task: ticktick.Task{Title: "Garbage"}},
+		{Task: ticktick.Task{ID: "garbage", Title: "Garbage"}},
 	}
 	focusColW := maxTaskFocusInlineW(m, rows)
 	layout := computeTaskRowLayout(rows, w, focusColW)

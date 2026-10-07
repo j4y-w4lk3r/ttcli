@@ -21,15 +21,21 @@ func TestRenderTaskFocusInline(t *testing.T) {
 	}
 }
 
-func TestTaskFocusSummaryLookupByTitle(t *testing.T) {
+func TestTaskFocusSummaryUsesTheTaskID(t *testing.T) {
+	summary := ticktick.TaskFocusSummary{FullSessions: 3, LoggedSessions: 3, TotalSeconds: 4500}
 	m := model{
+		taskFocusByID: map[string]ticktick.TaskFocusSummary{"task-a": summary},
 		taskFocusByTitle: map[string]ticktick.TaskFocusSummary{
-			"typ (apple keyboard)": {FullSessions: 3, LoggedSessions: 3, TotalSeconds: 4500},
+			"typ (apple keyboard)": summary,
 		},
 	}
-	s, ok := m.taskFocusSummary(ticktick.Task{Title: "typ (apple keyboard)"})
-	if !ok || s.FullSessions != 3 {
-		t.Fatalf("lookup failed: ok=%v summary=%+v", ok, s)
+	renamed, ok := m.taskFocusSummary(ticktick.Task{ID: "task-a", Title: "typ renamed"})
+	if !ok || renamed.FullSessions != 3 {
+		t.Fatalf("rename hid the sessions: ok=%v summary=%+v", ok, renamed)
+	}
+	other, ok := m.taskFocusSummary(ticktick.Task{ID: "task-b", Title: "typ (apple keyboard)"})
+	if ok && other.FullSessions == 3 {
+		t.Fatal("a second task borrowed sessions by title")
 	}
 }
 

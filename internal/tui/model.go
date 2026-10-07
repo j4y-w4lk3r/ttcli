@@ -105,6 +105,9 @@ type model struct {
 	listStore              *listarchive.Store
 	pendingSelectListID    string
 	pendingPermanentDelete []ticktick.Task
+	taskUndo               *taskUndo
+	reminderCheckedAt      time.Time
+	reminderSent           map[string]struct{}
 
 	projectID   string
 	projectName string
@@ -439,18 +442,21 @@ type tasksLoadedMsg struct {
 }
 
 type taskDoneMsg struct {
-	count int
-	err   error
+	count    int
+	err      error
+	nextUndo *taskUndo
 }
 
 type taskAbandonedMsg struct {
-	count int
-	err   error
+	count    int
+	err      error
+	nextUndo *taskUndo
 }
 
 type taskReopenedMsg struct {
-	count int
-	err   error
+	count    int
+	err      error
+	nextUndo *taskUndo
 }
 
 type taskAddedMsg struct {
@@ -459,10 +465,12 @@ type taskAddedMsg struct {
 }
 
 type taskMovedMsg struct {
-	destID   string
-	destName string
-	count    int
-	err      error
+	destID     string
+	destName   string
+	count      int
+	err        error
+	nextUndo   *taskUndo
+	invalidate []string
 }
 
 type parentsAttachedMsg struct {
@@ -475,6 +483,7 @@ type taskDeletedMsg struct {
 	op             string
 	archiveRecords []taskarchive.Record
 	err            error
+	nextUndo       *taskUndo
 }
 
 type taskRecreatedMsg struct {
@@ -964,14 +973,14 @@ func completeTasksCmd(c *ticktick.Client, tasks []ticktick.Task, fallbackProject
 		if err != nil {
 			return taskDoneMsg{err: err}
 		}
-		count := 0
+		var done []ticktick.Task
 		for projectID, taskIDs := range grouped {
 			if err := c.CompleteTasks(projectID, taskIDs); err != nil {
-				return taskDoneMsg{count: count, err: err}
+				return taskDoneMsg{count: len(done), err: err, nextUndo: undoFor(undoReopen, done)}
 			}
-			count += len(taskIDs)
+			done = append(done, tasksWithIDs(tasks, taskIDs)...)
 		}
-		return taskDoneMsg{count: count}
+		return taskDoneMsg{count: len(done), nextUndo: undoFor(undoReopen, done)}
 	}
 }
 
@@ -984,14 +993,14 @@ func abandonTasksCmd(c *ticktick.Client, tasks []ticktick.Task, fallbackProjectI
 		if err != nil {
 			return taskAbandonedMsg{err: err}
 		}
-		count := 0
+		var done []ticktick.Task
 		for projectID, taskIDs := range grouped {
 			if err := c.AbandonTasks(projectID, taskIDs); err != nil {
-				return taskAbandonedMsg{count: count, err: err}
+				return taskAbandonedMsg{count: len(done), err: err, nextUndo: undoFor(undoReopenAbandoned, done)}
 			}
-			count += len(taskIDs)
+			done = append(done, tasksWithIDs(tasks, taskIDs)...)
 		}
-		return taskAbandonedMsg{count: count}
+		return taskAbandonedMsg{count: len(done), nextUndo: undoFor(undoReopenAbandoned, done)}
 	}
 }
 
@@ -1004,14 +1013,14 @@ func reopenAbandonedTasksCmd(c *ticktick.Client, tasks []ticktick.Task, fallback
 		if err != nil {
 			return taskReopenedMsg{err: err}
 		}
-		count := 0
+		var done []ticktick.Task
 		for projectID, taskIDs := range grouped {
 			if err := c.ReopenAbandonedTasks(projectID, taskIDs); err != nil {
-				return taskReopenedMsg{count: count, err: err}
+				return taskReopenedMsg{count: len(done), err: err, nextUndo: undoFor(undoAbandon, done)}
 			}
-			count += len(taskIDs)
+			done = append(done, tasksWithIDs(tasks, taskIDs)...)
 		}
-		return taskReopenedMsg{count: count}
+		return taskReopenedMsg{count: len(done), nextUndo: undoFor(undoAbandon, done)}
 	}
 }
 
@@ -1024,14 +1033,14 @@ func reopenTasksCmd(c *ticktick.Client, tasks []ticktick.Task, fallbackProjectID
 		if err != nil {
 			return taskReopenedMsg{err: err}
 		}
-		count := 0
+		var done []ticktick.Task
 		for projectID, taskIDs := range grouped {
 			if err := c.ReopenTasks(projectID, taskIDs); err != nil {
-				return taskReopenedMsg{count: count, err: err}
+				return taskReopenedMsg{count: len(done), err: err, nextUndo: undoFor(undoComplete, done)}
 			}
-			count += len(taskIDs)
+			done = append(done, tasksWithIDs(tasks, taskIDs)...)
 		}
-		return taskReopenedMsg{count: count}
+		return taskReopenedMsg{count: len(done), nextUndo: undoFor(undoComplete, done)}
 	}
 }
 
@@ -1044,14 +1053,14 @@ func trashTasksCmd(c *ticktick.Client, tasks []ticktick.Task, fallbackProjectID 
 		if err != nil {
 			return taskDeletedMsg{op: "trash", err: err}
 		}
-		count := 0
+		var done []ticktick.Task
 		for projectID, taskIDs := range grouped {
 			if err := c.TrashTasks(projectID, taskIDs); err != nil {
-				return taskDeletedMsg{count: count, op: "trash", err: err}
+				return taskDeletedMsg{count: len(done), op: "trash", err: err, nextUndo: undoFor(undoRestore, done)}
 			}
-			count += len(taskIDs)
+			done = append(done, tasksWithIDs(tasks, taskIDs)...)
 		}
-		return taskDeletedMsg{count: count, op: "trash"}
+		return taskDeletedMsg{count: len(done), op: "trash", nextUndo: undoFor(undoRestore, done)}
 	}
 }
 
@@ -1064,14 +1073,14 @@ func restoreTasksCmd(c *ticktick.Client, tasks []ticktick.Task, fallbackProjectI
 		if err != nil {
 			return taskDeletedMsg{op: "restore", err: err}
 		}
-		count := 0
+		var done []ticktick.Task
 		for projectID, taskIDs := range grouped {
 			if err := c.RestoreTasks(projectID, taskIDs); err != nil {
-				return taskDeletedMsg{count: count, op: "restore", err: err}
+				return taskDeletedMsg{count: len(done), op: "restore", err: err, nextUndo: undoFor(undoTrash, done)}
 			}
-			count += len(taskIDs)
+			done = append(done, tasksWithIDs(tasks, taskIDs)...)
 		}
-		return taskDeletedMsg{count: count, op: "restore"}
+		return taskDeletedMsg{count: len(done), op: "restore", nextUndo: undoFor(undoTrash, done)}
 	}
 }
 
@@ -1507,16 +1516,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if msg.count > 0 {
-				m.toast = fmt.Sprintf("%s reopened %d", iconCheck, msg.count)
+				m.noteTaskUndo(msg.nextUndo, fmt.Sprintf("%s reopened %d", iconCheck, msg.count))
 			}
 			m.errMsg = msg.err.Error()
 			return m, m.reloadCurrentTasks(false)
 		}
+		toast := iconCheck + " reopened"
 		if msg.count > 1 {
-			m.toast = fmt.Sprintf("%s reopened %d tasks", iconCheck, msg.count)
-		} else {
-			m.toast = iconCheck + " reopened"
+			toast = fmt.Sprintf("%s reopened %d tasks", iconCheck, msg.count)
 		}
+		m.noteTaskUndo(msg.nextUndo, toast)
 		return m, m.reloadCurrentTasks(false)
 
 	case taskAbandonedMsg:
@@ -1526,16 +1535,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if msg.count > 0 {
-				m.toast = fmt.Sprintf("%s moved %d to Won't Do", iconCheck, msg.count)
+				m.noteTaskUndo(msg.nextUndo, fmt.Sprintf("%s moved %d to Won't Do", iconCheck, msg.count))
 			}
 			m.errMsg = msg.err.Error()
 			return m, m.reloadCurrentTasks(false)
 		}
+		toast := iconCheck + " moved to Won't Do"
 		if msg.count > 1 {
-			m.toast = fmt.Sprintf("%s moved %d tasks to Won't Do", iconCheck, msg.count)
-		} else {
-			m.toast = iconCheck + " moved to Won't Do"
+			toast = fmt.Sprintf("%s moved %d tasks to Won't Do", iconCheck, msg.count)
 		}
+		m.noteTaskUndo(msg.nextUndo, toast)
 		return m, m.reloadCurrentTasks(false)
 
 	case taskDoneMsg:
@@ -1545,16 +1554,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if msg.count > 0 {
-				m.toast = fmt.Sprintf("%s completed %d", iconCheck, msg.count)
+				m.noteTaskUndo(msg.nextUndo, fmt.Sprintf("%s completed %d", iconCheck, msg.count))
 			}
 			m.errMsg = msg.err.Error()
 			return m, m.reloadCurrentTasks(false)
 		}
+		toast := iconCheck + " completed"
 		if msg.count > 1 {
-			m.toast = fmt.Sprintf("%s completed %d tasks", iconCheck, msg.count)
-		} else {
-			m.toast = iconCheck + " completed"
+			toast = fmt.Sprintf("%s completed %d tasks", iconCheck, msg.count)
 		}
+		m.noteTaskUndo(msg.nextUndo, toast)
 		return m, m.reloadCurrentTasks(false)
 
 	case taskAddedMsg:
@@ -1579,22 +1588,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.destID != "" && msg.destID != m.projectID {
 				m.repo.InvalidateTasks(msg.destID)
 			}
+			for _, id := range msg.invalidate {
+				if id != "" && id != m.projectID {
+					m.repo.InvalidateTasks(id)
+				}
+			}
 			m.repo.InvalidateTree()
 		}
 		if msg.err != nil {
 			if msg.count > 0 {
-				m.toast = fmt.Sprintf("%s moved %d to %s (some failed)", iconCheck, msg.count, msg.destName)
+				m.noteTaskUndo(msg.nextUndo, fmt.Sprintf("%s moved %d to %s (some failed)", iconCheck, msg.count, msg.destName))
 			} else {
 				m.toast = iconOverdue + " move failed"
 			}
 			m.errMsg = msg.err.Error()
 			return m, tea.Batch(loadTreeCmd(m.repo, false), m.reloadCurrentTasks(false))
 		}
+		toast := iconCheck + " moved to " + msg.destName
 		if msg.count > 1 {
-			m.toast = fmt.Sprintf("%s moved %d tasks to %s", iconCheck, msg.count, msg.destName)
-		} else {
-			m.toast = iconCheck + " moved to " + msg.destName
+			toast = fmt.Sprintf("%s moved %d tasks to %s", iconCheck, msg.count, msg.destName)
 		}
+		m.noteTaskUndo(msg.nextUndo, toast)
 		return m, tea.Batch(loadTreeCmd(m.repo, false), m.reloadCurrentTasks(false))
 
 	case taskTitleCopiedMsg:
@@ -1617,19 +1631,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if msg.count > 0 {
-				m.toast = fmt.Sprintf("%s %s %d task(s); remaining operation failed", iconCheck, msg.op, msg.count)
+				m.noteTaskUndo(msg.nextUndo, fmt.Sprintf("%s %s %d task(s); remaining operation failed", iconCheck, msg.op, msg.count))
 			}
 			m.errMsg = msg.err.Error()
 			return m, m.reloadCurrentTasks(false)
 		}
+		var toast string
 		switch msg.op {
 		case "restore":
-			m.toast = fmt.Sprintf("%s restored %d task(s)", iconCheck, msg.count)
+			toast = fmt.Sprintf("%s restored %d task(s)", iconCheck, msg.count)
 		case "permanent":
+			m.taskUndo = nil
 			m.toast = fmt.Sprintf("%s permanently deleted %d task(s) · snapshot archived", iconCheck, msg.count)
+			return m, m.reloadCurrentTasks(false)
 		default:
-			m.toast = fmt.Sprintf("%s moved %d task(s) to Trash", iconCheck, msg.count)
+			toast = fmt.Sprintf("%s moved %d task(s) to Trash", iconCheck, msg.count)
 		}
+		m.noteTaskUndo(msg.nextUndo, toast)
 		return m, m.reloadCurrentTasks(false)
 
 	case taskRecreatedMsg:
@@ -2144,6 +2162,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.focusPickerCursor = m.focusPickerInitialCursor(msg.tasks)
 		return m, nil
 
+	case reminderScanMsg:
+		return m.deliverReminders(msg)
+
 	case tickMsg:
 		now := time.Time(msg)
 		m.pomoNowTick = now
@@ -2560,6 +2581,16 @@ func (m model) updateTasksKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	case "u":
 		if m.paneFocus == paneTasks && m.markedTaskCount() > 0 {
 			return m.clearTaskMarks(), nil
+		}
+		if m.paneFocus == paneTasks {
+			if m.taskUndo == nil || len(m.taskUndo.tasks) == 0 {
+				m.errMsg = "nothing to undo"
+				return m, nil
+			}
+			undo := m.taskUndo
+			m.taskUndo = nil
+			m.toast = "undoing…"
+			return m, m.runTaskUndo(undo)
 		}
 		if m.paneFocus == paneLists {
 			if m.listStore == nil || m.client == nil {
