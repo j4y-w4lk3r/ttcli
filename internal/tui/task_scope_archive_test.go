@@ -18,7 +18,7 @@ func (f *fakePermanentDeleteClient) TaskSnapshot(_, _ string) (json.RawMessage, 
 	return f.raw, nil
 }
 
-func (f *fakePermanentDeleteClient) DeleteTasks(_ string, _ []string) error {
+func (f *fakePermanentDeleteClient) PurgeTrashTasks(_ string, _ []string) error {
 	f.deleteCalls++
 	return nil
 }
@@ -45,6 +45,23 @@ func TestTaskScopesCycleAndSearchNotesAndTags(t *testing.T) {
 	m.filterInput.SetValue("home")
 	if tasks := m.visibleTasks(); len(tasks) != 1 || tasks[0].ID != "open" {
 		t.Fatalf("tag search=%+v", tasks)
+	}
+}
+
+func TestEscClearsAppliedTaskFilter(t *testing.T) {
+	m := fixtureModel(120, 40)
+	m.paneFocus = paneTasks
+	m.filterInput.SetValue("number 3")
+	before := len(m.visibleTasks())
+	if before == 0 || before == len(m.tasks) {
+		t.Fatalf("filter visible=%d total=%d", before, len(m.tasks))
+	}
+	out, _ := m.updateTasksKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if out.filterInput.Value() != "" {
+		t.Fatalf("filter=%q", out.filterInput.Value())
+	}
+	if got := len(out.visibleTasks()); got != len(m.tasks) {
+		t.Fatalf("visible=%d want %d", got, len(m.tasks))
 	}
 }
 

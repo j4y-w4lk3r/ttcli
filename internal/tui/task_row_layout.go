@@ -28,6 +28,10 @@ func taskPrefixWidth(depth int) int {
 }
 
 func computeTaskRowLayout(rows []taskListRow, contentW, focusColW int) taskRowLayout {
+	return computeTaskRowLayoutNamed(rows, contentW, focusColW, nil)
+}
+
+func computeTaskRowLayoutNamed(rows []taskListRow, contentW, focusColW int, listName func(projectID string) string) taskRowLayout {
 	if contentW < 20 {
 		contentW = 20
 	}
@@ -37,7 +41,13 @@ func computeTaskRowLayout(rows []taskListRow, contentW, focusColW int) taskRowLa
 		if pw := taskPrefixWidth(r.Depth); pw > maxPrefixW {
 			maxPrefixW = pw
 		}
-		if tw := lipgloss.Width(displayText(r.Task.Title)); tw > maxTitleW {
+		title := displayText(r.Task.Title)
+		if listName != nil {
+			if name := strings.TrimSpace(listName(r.Task.ProjectID)); name != "" {
+				title += " · " + name
+			}
+		}
+		if tw := lipgloss.Width(title); tw > maxTitleW {
 			maxTitleW = tw
 		}
 	}
@@ -97,7 +107,8 @@ func formatTaskRow(prefix, styledTitle, focusPart, due string, layout taskRowLay
 		title = truncateRenderedWidth(title, titleSlot)
 	}
 
-	left := padToWidth(prefix+title, leftTarget)
+	left := prefix + title
+	left = padToWidth(left, leftTarget)
 	suffix := focusPart + due
 	line := left + strings.Repeat(" ", taskSuffixGap) + suffix
 	return truncateRenderedWidth(line, contentW)

@@ -159,6 +159,63 @@ func TestCreateTaskWritesScheduleRecurrenceAndNativeFocusTogether(t *testing.T) 
 	}
 }
 
+func TestUpdateTaskClearsParentAndUnlinksTheChild(t *testing.T) {
+	const projectID = "0123456789abcdef01234567"
+	const childID = "fedcba9876543210fedcba98"
+	const parentID = "abcdef0123456789abcdef01"
+	var parentCleared bool
+	var keptParent any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/batch/task":
+			var payload struct {
+				Update []map[string]any `json:"update"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			keptParent = payload.Update[0]["parentId"]
+			_, _ = w.Write([]byte(`{}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/batch/taskParent":
+			var items []map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&items); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if len(items) != 1 || items[0]["taskId"] != childID || items[0]["projectId"] != projectID || items[0]["oldParentId"] != parentID {
+				t.Errorf("parent clear body=%v", items)
+			}
+			parentCleared = true
+			_, _ = w.Write([]byte(`{"id2error":{}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/project/"+projectID+"/tasks":
+			parent := parentID
+			if parentCleared {
+				parent = ""
+			}
+			_, _ = w.Write([]byte(`[{"id":"` + childID + `","projectId":"` + projectID + `","title":"fm2","parentId":"` + parent + `","status":0}]`))
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client := repositoryTestClient(server)
+	err := client.UpdateTask(childID, projectID, TaskUpdateInput{
+		Title: "fm2", ClearParent: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !parentCleared {
+		t.Fatal("expected taskParent request")
+	}
+	if keptParent != parentID {
+		t.Fatalf("task update changed parentId to %v", keptParent)
+	}
+}
+
 func TestParseReminderBefore(t *testing.T) {
 	cases := []struct {
 		raw  string

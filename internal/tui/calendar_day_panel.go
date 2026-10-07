@@ -37,15 +37,7 @@ func buildCalDayVisualRows(rows []calDayRow, maxRows int) []calDayVisualRow {
 	rowsPerHour := calDayRowsPerHour(rows, maxRows)
 	visual := make([]calDayVisualRow, 0, len(rows))
 	for sourceIndex, row := range rows {
-		span := 1
-		if row.kind == "task" {
-			minutes := max(row.estimate.Minutes, 1)
-			if !row.end.IsZero() && row.end.After(row.start) {
-				minutes = max(int(row.end.Sub(row.start).Minutes()+0.5), 1)
-			}
-			span = max((minutes*rowsPerHour+59)/60, 1)
-			span = min(span, 16)
-		}
+		span := calDayTaskSpan(row, rowsPerHour)
 		visual = append(visual, calDayVisualRow{row: row, sourceIndex: sourceIndex, span: span})
 		for continuation := 1; continuation < span; continuation++ {
 			visual = append(visual, calDayVisualRow{
@@ -54,6 +46,18 @@ func buildCalDayVisualRows(rows []calDayRow, maxRows int) []calDayVisualRow {
 		}
 	}
 	return visual
+}
+
+// calDayTaskSpan stretches a task that has a start and an end. A due time
+// with only a focus estimate stays on one row; the estimate is already in
+// the title suffix.
+func calDayTaskSpan(row calDayRow, rowsPerHour int) int {
+	if row.kind != "task" || row.end.IsZero() || !row.end.After(row.start) || rowsPerHour < 1 {
+		return 1
+	}
+	minutes := max(int(row.end.Sub(row.start).Minutes()+0.5), 1)
+	span := max((minutes*rowsPerHour+59)/60, 1)
+	return min(span, 16)
 }
 
 func calDayVisualCursor(rows []calDayVisualRow, sourceCursor int) int {

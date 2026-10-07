@@ -25,11 +25,12 @@ const (
 	addTaskFieldRepeatRule
 	addTaskFieldReminder
 	addTaskFieldPriority
+	addTaskFieldParent
 	addTaskFieldCount
 )
 
 var (
-	addTaskFieldLabels = []string{"Title", "Notes", "Due date", "Start time", "Duration", "Planned focus", "Repeat", "Repeat from", "Custom rule", "Reminder", "Priority"}
+	addTaskFieldLabels = []string{"Title", "Notes", "Due date", "Start time", "Duration", "Planned focus", "Repeat", "Repeat from", "Custom rule", "Reminder", "Priority", "Parent"}
 	addTaskFieldHints  = []string{
 		"required",
 		"optional · Enter for new line",
@@ -42,6 +43,7 @@ var (
 		"RRULE:… or ERULE:…",
 		"none · 0 · 5 · 15 · 30 · 60",
 		"none · low · med · high",
+		"[ ] keep the subtask or make it a normal task",
 	}
 	addTaskRepeatOpts     = []string{"none", "daily", "weekdays", "weekly", "custom"}
 	addTaskRepeatFromOpts = []struct {
@@ -152,6 +154,9 @@ func (m *model) openEditTaskForm(t ticktick.Task) {
 	}
 	m.addTaskRepeatIdx = repeatOptionIndex(t.RepeatFlag)
 	m.addTaskRepeatFromIdx = repeatFromOptionIndex(t.RepeatFrom.Int())
+	m.editTaskParentID = t.ParentID
+	m.editTaskParentTitle = m.taskTitleByID(t.ParentID)
+	m.editTaskParentIdx = 0
 	if addTaskRepeatOpts[m.addTaskRepeatIdx] == "custom" {
 		m.addTaskRepeatInput.SetValue(t.RepeatFlag)
 	}
@@ -166,6 +171,9 @@ func (m *model) resetTaskFormFields() {
 	m.addTaskPriorityIdx = 0
 	m.addTaskRepeatIdx = 0
 	m.addTaskRepeatFromIdx = 0
+	m.editTaskParentID = ""
+	m.editTaskParentTitle = ""
+	m.editTaskParentIdx = 0
 	m.taskTitleInput.SetValue("")
 	m.taskTitleInput.Placeholder = "task title…"
 	m.addTaskNotesInput.Reset()
@@ -274,7 +282,36 @@ func (m *model) focusAddTaskField() {
 }
 
 func (m model) taskFormFieldVisible(field int) bool {
-	return field != addTaskFieldRepeatRule || addTaskRepeatOpts[m.addTaskRepeatIdx] == "custom"
+	switch field {
+	case addTaskFieldRepeatRule:
+		return addTaskRepeatOpts[m.addTaskRepeatIdx] == "custom"
+	case addTaskFieldParent:
+		return m.editTaskParentID != ""
+	default:
+		return true
+	}
+}
+
+func (m model) taskTitleByID(id string) string {
+	if id == "" {
+		return ""
+	}
+	for _, task := range m.tasks {
+		if task.ID == id {
+			return task.Title
+		}
+	}
+	return ""
+}
+
+func (m model) parentFieldChoice() string {
+	if m.editTaskParentIdx != 0 {
+		return "normal task"
+	}
+	if title := strings.TrimSpace(m.editTaskParentTitle); title != "" {
+		return "subtask of " + title
+	}
+	return "subtask"
 }
 
 func (m model) nextTaskFormField(field, delta int) int {
@@ -354,6 +391,8 @@ func (m model) renderAddTaskForm(width, innerLines int) string {
 			lines = append(lines, truncateInner(m.renderAddTaskChoice(addTaskReminderOpts[m.addTaskReminderIdx].label, active), contentW))
 		case addTaskFieldPriority:
 			lines = append(lines, truncateInner(m.renderAddTaskChoice(addTaskPriorityOpts[m.addTaskPriorityIdx].label, active), contentW))
+		case addTaskFieldParent:
+			lines = append(lines, truncateInner(m.renderAddTaskChoice(m.parentFieldChoice(), active), contentW))
 		}
 		if i < addTaskFieldCount-1 {
 			lines = append(lines, "")
@@ -363,7 +402,7 @@ func (m model) renderAddTaskForm(width, innerLines int) string {
 		lines = append(lines, "", truncateInner(sectionHeader("Plan preview", contentW), contentW))
 		lines = append(lines, truncateInner(hintStyle.Render(preview), contentW))
 	}
-	if h := m.keyHint("tab next · shift+tab prev · [/] cycle · enter next/save · esc cancel · notes: enter = newline"); h != "" {
+	if h := m.keyHint("tab / shift+tab fields · enter save · ctrl+s save in notes · esc cancel · notes: enter = newline"); h != "" {
 		lines = append(lines, "", truncateInner(h, contentW))
 	}
 	if len(lines) > innerLines {
@@ -416,6 +455,54 @@ func (m model) taskFormPreview() string {
 	return strings.Join(parts, " · ")
 }
 
+func (m model) submitTaskForm() (model, tea.Cmd) {
+	sched, clearDue, err := m.parseTaskFormSchedule()
+	if err != nil {
+		m.errMsg = err.Error()
+		return m, nil
+	}
+	focusPlan, err := m.parseTaskFocusPlan()
+	if err != nil {
+		m.errMsg = err.Error()
+		return m, nil
+	}
+	recurrence, clearRecurrence, err := m.parseTaskRecurrence(sched)
+	if err != nil {
+		m.errMsg = err.Error()
+		return m, nil
+	}
+	title := strings.TrimSpace(m.taskTitleInput.Value())
+	notes := taskNotesToHTML(m.addTaskNotesInput.Value())
+	priority := addTaskPriorityOpts[m.addTaskPriorityIdx].value
+	if m.mode == modeEditTask {
+		if m.editTaskID == "" {
+			m.errMsg = "no task selected"
+			return m, nil
+		}
+		return m, updateTaskCmd(
+			m.client, m.editTaskID, m.projectID, title, notes, priority,
+			sched, clearDue, recurrence, clearRecurrence, focusPlan,
+			m.editTaskParentID != "" && m.editTaskParentIdx != 0,
+		)
+	}
+	if m.projectID == "" {
+		m.errMsg = "select a list first"
+		return m, nil
+	}
+	createIn := ticktick.TaskCreateInput{
+		Title:     title,
+		Content:   notes,
+		ProjectID: m.projectID,
+		Priority:  priority,
+	}
+	if !clearDue && sched != nil {
+		createIn.Schedule = sched
+	}
+	createIn.Recurrence = recurrence
+	createIn.FocusPlan = focusPlan
+	return m, createTaskCmd(m.client, createIn)
+}
+
 func (m model) updateAddTaskForm(msg tea.KeyMsg) (model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
@@ -437,55 +524,9 @@ func (m model) updateAddTaskForm(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.addTaskNotesInput, cmd = m.addTaskNotesInput.Update(msg)
 			return m, cmd
 		}
-		if m.addTaskField < addTaskFieldCount-1 {
-			m.addTaskField = m.nextTaskFormField(m.addTaskField, 1)
-			m.focusAddTaskField()
-			return m, textinput.Blink
-		}
-		sched, clearDue, err := m.parseTaskFormSchedule()
-		if err != nil {
-			m.errMsg = err.Error()
-			return m, nil
-		}
-		focusPlan, err := m.parseTaskFocusPlan()
-		if err != nil {
-			m.errMsg = err.Error()
-			return m, nil
-		}
-		recurrence, clearRecurrence, err := m.parseTaskRecurrence(sched)
-		if err != nil {
-			m.errMsg = err.Error()
-			return m, nil
-		}
-		title := strings.TrimSpace(m.taskTitleInput.Value())
-		notes := taskNotesToHTML(m.addTaskNotesInput.Value())
-		priority := addTaskPriorityOpts[m.addTaskPriorityIdx].value
-		if m.mode == modeEditTask {
-			if m.editTaskID == "" {
-				m.errMsg = "no task selected"
-				return m, nil
-			}
-			return m, updateTaskCmd(
-				m.client, m.editTaskID, m.projectID, title, notes, priority,
-				sched, clearDue, recurrence, clearRecurrence, focusPlan,
-			)
-		}
-		if m.projectID == "" {
-			m.errMsg = "select a list first"
-			return m, nil
-		}
-		createIn := ticktick.TaskCreateInput{
-			Title:     title,
-			Content:   notes,
-			ProjectID: m.projectID,
-			Priority:  priority,
-		}
-		if !clearDue && sched != nil {
-			createIn.Schedule = sched
-		}
-		createIn.Recurrence = recurrence
-		createIn.FocusPlan = focusPlan
-		return m, createTaskCmd(m.client, createIn)
+		return m.submitTaskForm()
+	case "ctrl+s", "ctrl+j":
+		return m.submitTaskForm()
 	case "[", "left":
 		if m.addTaskField == addTaskFieldRepeat {
 			m.addTaskRepeatIdx--
@@ -515,6 +556,10 @@ func (m model) updateAddTaskForm(msg tea.KeyMsg) (model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.addTaskField == addTaskFieldParent {
+			m.editTaskParentIdx = 1 - m.editTaskParentIdx
+			return m, nil
+		}
 	case "]", "right":
 		if m.addTaskField == addTaskFieldRepeat {
 			m.addTaskRepeatIdx = (m.addTaskRepeatIdx + 1) % len(addTaskRepeatOpts)
@@ -530,6 +575,10 @@ func (m model) updateAddTaskForm(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 		if m.addTaskField == addTaskFieldPriority {
 			m.addTaskPriorityIdx = (m.addTaskPriorityIdx + 1) % len(addTaskPriorityOpts)
+			return m, nil
+		}
+		if m.addTaskField == addTaskFieldParent {
+			m.editTaskParentIdx = 1 - m.editTaskParentIdx
 			return m, nil
 		}
 	}
@@ -669,6 +718,7 @@ func updateTaskCmd(
 	recurrence *ticktick.TaskRecurrence,
 	clearRecurrence bool,
 	focusPlan *ticktick.TaskFocusPlan,
+	clearParent bool,
 ) tea.Cmd {
 	return func() tea.Msg {
 		in := ticktick.TaskUpdateInput{
@@ -680,6 +730,7 @@ func updateTaskCmd(
 			Recurrence:      recurrence,
 			ClearRecurrence: clearRecurrence,
 			FocusPlan:       focusPlan,
+			ClearParent:     clearParent,
 		}
 		err := c.UpdateTask(taskID, projectID, in)
 		return taskUpdatedMsg{title: title, err: err}

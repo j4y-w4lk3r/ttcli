@@ -134,13 +134,26 @@ func TestCalWeekColumnBudgetAndRowBoundariesAlign(t *testing.T) {
 	wantDivider := -1
 	for _, row := range rows {
 		plain := stripANSI(row)
-		byteIndex := strings.Index(plain, "┊")
+		byteIndex := strings.Index(plain, "│")
 		divider := runewidth.StringWidth(plain[:byteIndex])
 		if wantDivider < 0 {
 			wantDivider = divider
 		} else if divider != wantDivider {
 			t.Fatalf("week boundary drift: got divider=%d want=%d row=%q", divider, wantDivider, plain)
 		}
+		if strings.Count(plain, "│") != 7 {
+			t.Fatalf("day rules=%d want 7 row=%q", strings.Count(plain, "│"), plain)
+		}
+	}
+}
+
+func TestWeekDayColumnsKeepAGutterInsideTheRule(t *testing.T) {
+	start := weekStart(time.Date(2026, 9, 21, 0, 0, 0, 0, time.Local))
+	colW, contentW := calWeekColumnWidths(246)
+	fullRowW := dayTimeColW + len(dayTimelineGap()) + contentW
+	line := stripANSI(renderCalWeekSlotRow(9, start, buildCalIndex(nil), planning.DefaultConfig(), colW, fullRowW))
+	if strings.Count(line, "│") != 7 || strings.Contains(line, "╌╌") {
+		t.Fatalf("expected an open gutter after each day rule:\n%s", line)
 	}
 }
 
@@ -314,8 +327,17 @@ func TestCalendarNowRulesAreProminent(t *testing.T) {
 		calWeekRow{kind: "now", dayIndex: 3}, time.Date(2026, 9, 18, 12, 34, 0, 0, time.Local),
 		colW, dayTimeColW+len(dayTimelineGap())+contentW,
 	))
-	if !strings.Contains(weekLine, "● NOW") || strings.Count(weekLine, "━") < 20 {
+	if !strings.Contains(weekLine, "● NOW") {
 		t.Fatalf("week now line=%q", weekLine)
+	}
+	marked := 0
+	for _, part := range strings.Split(weekLine, "│") {
+		if strings.Contains(part, "━") || strings.Contains(part, "● NOW") {
+			marked++
+		}
+	}
+	if marked != 1 {
+		t.Fatalf("now bar on %d columns, want today's only: %q", marked, weekLine)
 	}
 }
 

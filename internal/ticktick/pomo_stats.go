@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	StandardPomoMinutes = 25
+	StandardPomoMinutes  = 25
 	UnclaimedTitlePrefix = "Unclaimed · "
 )
 
@@ -40,6 +40,26 @@ func parseRecordTime(s string) (time.Time, bool) {
 // IsUnclaimedTitle reports logged overtime slices (post-session extra time).
 func IsUnclaimedTitle(title string) bool {
 	return strings.HasPrefix(title, UnclaimedTitlePrefix)
+}
+
+// ClaimedSeconds is logged focus time excluding unclaimed overtime.
+// Individual records are the source of truth when present. Callers that only
+// have an aggregate fall back to TotalSeconds.
+func (s *FocusStats) ClaimedSeconds() int64 {
+	if s == nil {
+		return 0
+	}
+	if len(s.Records) == 0 {
+		return s.TotalSeconds
+	}
+	var secs int64
+	for _, r := range s.Records {
+		if IsUnclaimedTitle(r.TaskTitle()) {
+			continue
+		}
+		secs += int64(RecordDuration(r).Seconds() + 0.5)
+	}
+	return secs
 }
 
 // IsFullPomoRecord counts toward the daily pomodoro goal: a standard-length

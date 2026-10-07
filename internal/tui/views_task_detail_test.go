@@ -8,6 +8,16 @@ import (
 	"github.com/j4y-w4lk3r/ttcli/internal/ticktick"
 )
 
+func TestWontDoDetailIsNotLabeledCompleted(t *testing.T) {
+	lines := taskDetailPanel(ticktick.Task{ID: "skip", Title: "ESP32", Status: -1}, func(ticktick.Task) (ticktick.TaskFocusSummary, bool) {
+		return ticktick.TaskFocusSummary{}, false
+	}, 40, 8)
+	text := stripANSI(strings.Join(lines, "\n"))
+	if strings.Contains(text, "completed") || !strings.Contains(text, "won't do") {
+		t.Fatalf("detail=%q", text)
+	}
+}
+
 func TestBuildVisibleTaskRowsDedupesByID(t *testing.T) {
 	tasks := []ticktick.Task{
 		{ID: "a1", Title: "add the Disney + to the fm", DueDate: "2026-08-05"},

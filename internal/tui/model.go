@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/j4y-w4lk3r/ttcli/internal/focus"
+	"github.com/j4y-w4lk3r/ttcli/internal/listarchive"
 	"github.com/j4y-w4lk3r/ttcli/internal/notify"
 	"github.com/j4y-w4lk3r/ttcli/internal/sessionlog"
 	"github.com/j4y-w4lk3r/ttcli/internal/taskarchive"
@@ -42,6 +44,7 @@ const (
 	modeEditTask
 	modeAddPomoForm
 	modeFilter
+	modeListSearch
 	modeRenameList
 	modeRenameTask
 	modeRenamePomo
@@ -51,6 +54,8 @@ const (
 	modeAddList
 	modeAddFolder
 	modeConfirmDelete
+	modeAskAI
+	modeAskAIPreview
 )
 
 // Run starts the interactive TickTick browser.
@@ -85,6 +90,10 @@ type model struct {
 	listCursor int
 
 	tasks                  []ticktick.Task
+	visibleRows            []taskListRow
+	visibleRowsKey         visibleRowsCacheKey
+	visibleRowsReady       bool
+	visibleFocusColW       int
 	taskCursor             int
 	taskMarked             map[string]struct{}
 	showCompleted          bool
@@ -92,6 +101,8 @@ type model struct {
 	taskScope              TaskScope
 	archiveStore           *taskarchive.Store
 	archiveRecords         []taskarchive.Record
+	listStore              *listarchive.Store
+	pendingSelectListID    string
 	pendingPermanentDelete []ticktick.Task
 
 	projectID   string
@@ -112,8 +123,14 @@ type model struct {
 	addTaskRepeatIdx     int
 	addTaskRepeatFromIdx int
 	editTaskID           string
+	editTaskParentID     string
+	editTaskParentTitle  string
+	editTaskParentIdx    int
 	filterInput          textinput.Model
+	listSearchInput      textinput.Model
+	listSearchCursor     int
 	renameInput          textinput.Model
+	ask                  askState
 
 	addListFolder string // folder context when creating a list
 
@@ -121,6 +138,7 @@ type model struct {
 	listPickerRows        []listPickerRow
 	listPickerCursor      int
 	listPickerTaskIDs     []string
+	listPickerMoveTasks   []ticktick.Task
 	listPickerFromProject string
 	listPickerListRef     string
 
@@ -185,9 +203,11 @@ type model struct {
 
 	focusTrackedStart time.Time
 
-	loading bool
-	toast   string
-	errMsg  string
+	loading  bool
+	toast    string
+	errMsg   string
+	errShown string
+	errAt    time.Time
 
 	cacheStale   bool
 	cacheSavedAt time.Time
@@ -208,11 +228,20 @@ func newModel(client *ticktick.Client) model {
 	filter.PromptStyle = inputPromptStyle
 	filter.TextStyle = inputStyle
 
+	listSearch := textinput.New()
+	listSearch.Placeholder = "find a list…"
+	listSearch.CharLimit = 80
+	listSearch.Prompt = iconFilter + " "
+	listSearch.PromptStyle = inputPromptStyle
+	listSearch.TextStyle = inputStyle
+
 	rename := textinput.New()
 	rename.CharLimit = 120
 	rename.Prompt = iconEdit + " "
 	rename.PromptStyle = inputPromptStyle
 	rename.TextStyle = inputStyle
+
+	ask := newAskInput()
 
 	addDue := newAddTaskFieldInput("YYYY-MM-DD")
 	addTime := newAddTaskFieldInput("HH:MM")
@@ -240,11 +269,13 @@ func newModel(client *ticktick.Client) model {
 	var taskCheckins []taskcheckin.Record
 	var archiveStore *taskarchive.Store
 	var archiveRecords []taskarchive.Record
+	var listStore *listarchive.Store
 	if client != nil {
 		checkinStore = taskcheckin.NewStore()
 		taskCheckins, _ = checkinStore.Records()
 		archiveStore = taskarchive.NewStore()
 		archiveRecords, _ = archiveStore.Records()
+		listStore = listarchive.NewStore()
 	}
 	m := model{
 		client:               client,
@@ -253,6 +284,7 @@ func newModel(client *ticktick.Client) model {
 		taskCheckins:         taskCheckins,
 		archiveStore:         archiveStore,
 		archiveRecords:       archiveRecords,
+		listStore:            listStore,
 		taskScope:            normalizeTaskScope(settings.TaskScope),
 		calFocusByDate:       make(map[string]*ticktick.FocusStats),
 		view:                 startView,
@@ -268,7 +300,9 @@ func newModel(client *ticktick.Client) model {
 		addTaskNotesInput:    addNotes,
 		addPomoPauseInput:    addPomoPause,
 		filterInput:          filter,
+		listSearchInput:      listSearch,
 		renameInput:          rename,
+		ask:                  askState{input: ask},
 		calDate:              dateOnly(now),
 		calMode:              calModeMonth,
 		pomoNowTick:          now,
@@ -313,7 +347,9 @@ func (m *model) hydrateCachedData() {
 		m.tree = ticktick.ProjectTreeWithInbox(tree.InboxID, tree.Groups, projects)
 		m.inboxID = tree.InboxID
 		m.listRows = buildListRows(m.tree)
-		m.listCursor = m.firstListCursor()
+		if !m.selectListByID(m.uiSettings.LastListID) {
+			m.listCursor = m.firstListCursor()
+		}
 		if row, ok := m.currentListRow(); ok {
 			m.projectID = row.node.ID
 			m.projectName = row.node.Name
@@ -406,6 +442,11 @@ type taskDoneMsg struct {
 	err   error
 }
 
+type taskAbandonedMsg struct {
+	count int
+	err   error
+}
+
 type taskReopenedMsg struct {
 	count int
 	err   error
@@ -459,9 +500,19 @@ type folderAddedMsg struct {
 }
 
 type listDeletedMsg struct {
-	kind string
-	name string
-	err  error
+	kind    string
+	name    string
+	id      string
+	canUndo bool
+	err     error
+}
+
+type listRestoredMsg struct {
+	kind      string
+	name      string
+	projectID string
+	tasks     int
+	err       error
 }
 
 type listRenamedMsg struct {
@@ -576,6 +627,29 @@ func tickCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
+const errorVisibleFor = 10 * time.Second
+
+// expireError clears the footer error 10 seconds after it first appears.
+// A different message starts a new 10 seconds.
+func (m model) expireError(now time.Time) model {
+	if m.errMsg == "" {
+		m.errShown = ""
+		m.errAt = time.Time{}
+		return m
+	}
+	if m.errMsg != m.errShown {
+		m.errShown = m.errMsg
+		m.errAt = now
+		return m
+	}
+	if !m.errAt.IsZero() && !now.Before(m.errAt.Add(errorVisibleFor)) {
+		m.errMsg = ""
+		m.errShown = ""
+		m.errAt = time.Time{}
+	}
+	return m
+}
+
 func loadTreeCmd(repo *ticktick.Repository, force bool) tea.Cmd {
 	return func() tea.Msg {
 		if repo == nil {
@@ -598,6 +672,36 @@ func loadTasksCmd(repo *ticktick.Repository, projectID, projectName string, forc
 		tasks, cache, err := repo.ProjectTasks(projectID, force)
 		return tasksLoadedMsg{
 			projectID: projectID, projectName: projectName, tasks: tasks,
+			cache: cache, err: err,
+		}
+	}
+}
+
+func loadAllTasksCmd(repo *ticktick.Repository, force bool) tea.Cmd {
+	return func() tea.Msg {
+		if repo == nil {
+			return tasksLoadedMsg{projectID: allTasksID, projectName: "All", err: fmt.Errorf("TickTick data repository unavailable")}
+		}
+		tasks, cache, err := repo.OpenTasks(force)
+		return tasksLoadedMsg{
+			projectID: allTasksID, projectName: "All", tasks: tasks,
+			cache: cache, err: err,
+		}
+	}
+}
+
+func loadFolderTasksCmd(repo *ticktick.Repository, folderID, name string, childIDs []string, force bool) tea.Cmd {
+	return func() tea.Msg {
+		if repo == nil {
+			return tasksLoadedMsg{projectID: folderID, projectName: name, err: fmt.Errorf("TickTick data repository unavailable")}
+		}
+		tasks, cache, err := repo.OpenTasks(force)
+		if err != nil && tasks == nil {
+			return tasksLoadedMsg{projectID: folderID, projectName: name, cache: cache, err: err}
+		}
+		return tasksLoadedMsg{
+			projectID: folderID, projectName: name,
+			tasks: tasksInProjects(tasks, childIDs),
 			cache: cache, err: err,
 		}
 	}
@@ -846,8 +950,15 @@ func deleteHabitCmd(c *ticktick.Client, id string) tea.Cmd {
 
 func completeTasksCmd(c *ticktick.Client, tasks []ticktick.Task, fallbackProjectID string) tea.Cmd {
 	return func() tea.Msg {
+		if c == nil {
+			return taskDoneMsg{err: fmt.Errorf("not connected")}
+		}
+		grouped, err := writableTaskProjects(tasks, fallbackProjectID)
+		if err != nil {
+			return taskDoneMsg{err: err}
+		}
 		count := 0
-		for projectID, taskIDs := range groupTasksByProject(tasks, fallbackProjectID) {
+		for projectID, taskIDs := range grouped {
 			if err := c.CompleteTasks(projectID, taskIDs); err != nil {
 				return taskDoneMsg{count: count, err: err}
 			}
@@ -857,10 +968,57 @@ func completeTasksCmd(c *ticktick.Client, tasks []ticktick.Task, fallbackProject
 	}
 }
 
+func abandonTasksCmd(c *ticktick.Client, tasks []ticktick.Task, fallbackProjectID string) tea.Cmd {
+	return func() tea.Msg {
+		if c == nil {
+			return taskAbandonedMsg{err: fmt.Errorf("not connected")}
+		}
+		grouped, err := writableTaskProjects(tasks, fallbackProjectID)
+		if err != nil {
+			return taskAbandonedMsg{err: err}
+		}
+		count := 0
+		for projectID, taskIDs := range grouped {
+			if err := c.AbandonTasks(projectID, taskIDs); err != nil {
+				return taskAbandonedMsg{count: count, err: err}
+			}
+			count += len(taskIDs)
+		}
+		return taskAbandonedMsg{count: count}
+	}
+}
+
+func reopenAbandonedTasksCmd(c *ticktick.Client, tasks []ticktick.Task, fallbackProjectID string) tea.Cmd {
+	return func() tea.Msg {
+		if c == nil {
+			return taskReopenedMsg{err: fmt.Errorf("not connected")}
+		}
+		grouped, err := writableTaskProjects(tasks, fallbackProjectID)
+		if err != nil {
+			return taskReopenedMsg{err: err}
+		}
+		count := 0
+		for projectID, taskIDs := range grouped {
+			if err := c.ReopenAbandonedTasks(projectID, taskIDs); err != nil {
+				return taskReopenedMsg{count: count, err: err}
+			}
+			count += len(taskIDs)
+		}
+		return taskReopenedMsg{count: count}
+	}
+}
+
 func reopenTasksCmd(c *ticktick.Client, tasks []ticktick.Task, fallbackProjectID string) tea.Cmd {
 	return func() tea.Msg {
+		if c == nil {
+			return taskReopenedMsg{err: fmt.Errorf("not connected")}
+		}
+		grouped, err := writableTaskProjects(tasks, fallbackProjectID)
+		if err != nil {
+			return taskReopenedMsg{err: err}
+		}
 		count := 0
-		for projectID, taskIDs := range groupTasksByProject(tasks, fallbackProjectID) {
+		for projectID, taskIDs := range grouped {
 			if err := c.ReopenTasks(projectID, taskIDs); err != nil {
 				return taskReopenedMsg{count: count, err: err}
 			}
@@ -872,8 +1030,15 @@ func reopenTasksCmd(c *ticktick.Client, tasks []ticktick.Task, fallbackProjectID
 
 func trashTasksCmd(c *ticktick.Client, tasks []ticktick.Task, fallbackProjectID string) tea.Cmd {
 	return func() tea.Msg {
+		if c == nil {
+			return taskDeletedMsg{op: "trash", err: fmt.Errorf("not connected")}
+		}
+		grouped, err := writableTaskProjects(tasks, fallbackProjectID)
+		if err != nil {
+			return taskDeletedMsg{op: "trash", err: err}
+		}
 		count := 0
-		for projectID, taskIDs := range groupTasksByProject(tasks, fallbackProjectID) {
+		for projectID, taskIDs := range grouped {
 			if err := c.TrashTasks(projectID, taskIDs); err != nil {
 				return taskDeletedMsg{count: count, op: "trash", err: err}
 			}
@@ -885,8 +1050,15 @@ func trashTasksCmd(c *ticktick.Client, tasks []ticktick.Task, fallbackProjectID 
 
 func restoreTasksCmd(c *ticktick.Client, tasks []ticktick.Task, fallbackProjectID string) tea.Cmd {
 	return func() tea.Msg {
+		if c == nil {
+			return taskDeletedMsg{op: "restore", err: fmt.Errorf("not connected")}
+		}
+		grouped, err := writableTaskProjects(tasks, fallbackProjectID)
+		if err != nil {
+			return taskDeletedMsg{op: "restore", err: err}
+		}
 		count := 0
-		for projectID, taskIDs := range groupTasksByProject(tasks, fallbackProjectID) {
+		for projectID, taskIDs := range grouped {
 			if err := c.RestoreTasks(projectID, taskIDs); err != nil {
 				return taskDeletedMsg{count: count, op: "restore", err: err}
 			}
@@ -898,7 +1070,7 @@ func restoreTasksCmd(c *ticktick.Client, tasks []ticktick.Task, fallbackProjectI
 
 type permanentTaskDeleteClient interface {
 	TaskSnapshot(projectID, taskID string) (json.RawMessage, error)
-	DeleteTasks(projectID string, taskIDs []string) error
+	PurgeTrashTasks(projectID string, taskIDs []string) error
 }
 
 func permanentlyDeleteTasksCmd(
@@ -927,9 +1099,13 @@ func permanentlyDeleteTasksCmd(
 		if err != nil {
 			return taskDeletedMsg{op: "permanent", err: fmt.Errorf("read task archive: %w", err)}
 		}
+		grouped, groupErr := writableTaskProjects(tasks, fallbackProjectID)
+		if groupErr != nil {
+			return taskDeletedMsg{op: "permanent", err: groupErr}
+		}
 		count := 0
-		for projectID, taskIDs := range groupTasksByProject(tasks, fallbackProjectID) {
-			if err := c.DeleteTasks(projectID, taskIDs); err != nil {
+		for projectID, taskIDs := range grouped {
+			if err := c.PurgeTrashTasks(projectID, taskIDs); err != nil {
 				return taskDeletedMsg{count: count, op: "permanent", archiveRecords: records, err: err}
 			}
 			count += len(taskIDs)
@@ -1216,6 +1392,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeFilter {
 			return m.updateFilter(msg)
 		}
+		if m.mode == modeListSearch {
+			return m.updateListSearch(msg)
+		}
 		if m.mode == modeRenameList || m.mode == modeRenamePomo || m.mode == modeRenameHabit {
 			return m.updateRename(msg)
 		}
@@ -1224,6 +1403,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.mode == modeListPicker {
 			return m.updateListPicker(msg)
+		}
+		if m.mode == modeAskAI || m.mode == modeAskAIPreview {
+			return m.updateAskAI(msg)
 		}
 		return m.updateKey(msg)
 
@@ -1240,8 +1422,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.listCursor >= len(m.listRows) {
 			m.listCursor = m.firstListCursor()
 		}
-		if m.view == viewTasks && m.projectID == "" && len(m.selectableLists()) > 0 {
-			m.listCursor = m.firstListCursor()
+		if m.pendingSelectListID != "" {
+			want := m.pendingSelectListID
+			m.pendingSelectListID = ""
+			if m.selectListByID(want) {
+				m.loading = true
+				return m, m.loadCurrentList()
+			}
+		}
+		if m.projectID != "" {
+			m.selectListByID(m.projectID)
+			if m.view == viewTasks && len(m.tasks) == 0 {
+				m.loading = true
+				return m, m.loadCurrentList()
+			}
+			return m, nil
+		}
+		if m.view == viewTasks && len(m.selectableLists()) > 0 {
+			if !m.selectListByID(m.uiSettings.LastListID) {
+				m.listCursor = m.firstListCursor()
+			}
 			m.loading = true
 			return m, m.loadCurrentList()
 		}
@@ -1262,11 +1462,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.projectID = msg.projectID
 		m.projectName = msg.projectName
 		m.tasks = dedupeTasks(msg.tasks)
+		m.invalidateVisibleRows()
 		m.taskSortMode = m.uiSettings.sortForProject(msg.projectID, m.inboxID)
 		sortTasksForProject(m.tasks, m.taskSortMode)
 		m.applyFilter()
-		if m.taskCursor >= len(m.visibleTasks()) {
-			m.taskCursor = max(len(m.visibleTasks())-1, 0)
+		if n := m.visibleTaskCount(); m.taskCursor >= n {
+			m.taskCursor = max(n-1, 0)
 		}
 		m.toast = ""
 		return m, nil
@@ -1281,14 +1482,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.toast = fmt.Sprintf("%s reopened %d", iconCheck, msg.count)
 			}
 			m.errMsg = msg.err.Error()
-			return m, loadTasksCmd(m.repo, m.projectID, m.projectName, false)
+			return m, m.reloadCurrentTasks(false)
 		}
 		if msg.count > 1 {
 			m.toast = fmt.Sprintf("%s reopened %d tasks", iconCheck, msg.count)
 		} else {
 			m.toast = iconCheck + " reopened"
 		}
-		return m, loadTasksCmd(m.repo, m.projectID, m.projectName, false)
+		return m, m.reloadCurrentTasks(false)
+
+	case taskAbandonedMsg:
+		m.clearTaskMarks()
+		if m.repo != nil && (msg.err == nil || msg.count > 0) {
+			m.repo.InvalidateTasks(m.projectID)
+		}
+		if msg.err != nil {
+			if msg.count > 0 {
+				m.toast = fmt.Sprintf("%s moved %d to Won't Do", iconCheck, msg.count)
+			}
+			m.errMsg = msg.err.Error()
+			return m, m.reloadCurrentTasks(false)
+		}
+		if msg.count > 1 {
+			m.toast = fmt.Sprintf("%s moved %d tasks to Won't Do", iconCheck, msg.count)
+		} else {
+			m.toast = iconCheck + " moved to Won't Do"
+		}
+		return m, m.reloadCurrentTasks(false)
 
 	case taskDoneMsg:
 		m.clearTaskMarks()
@@ -1300,14 +1520,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.toast = fmt.Sprintf("%s completed %d", iconCheck, msg.count)
 			}
 			m.errMsg = msg.err.Error()
-			return m, loadTasksCmd(m.repo, m.projectID, m.projectName, false)
+			return m, m.reloadCurrentTasks(false)
 		}
 		if msg.count > 1 {
 			m.toast = fmt.Sprintf("%s completed %d tasks", iconCheck, msg.count)
 		} else {
 			m.toast = iconCheck + " completed"
 		}
-		return m, loadTasksCmd(m.repo, m.projectID, m.projectName, false)
+		return m, m.reloadCurrentTasks(false)
 
 	case taskAddedMsg:
 		m.mode = modeNormal
@@ -1321,7 +1541,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.repo.InvalidateTasks(m.projectID)
 		}
 		m.toast = fmt.Sprintf("added %q", msg.title)
-		return m, loadTasksCmd(m.repo, m.projectID, m.projectName, false)
+		return m, m.reloadCurrentTasks(false)
 
 	case taskMovedMsg:
 		m.mode = modeNormal
@@ -1337,14 +1557,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.toast = iconOverdue + " move failed"
 			}
 			m.errMsg = msg.err.Error()
-			return m, tea.Batch(loadTreeCmd(m.repo, false), loadTasksCmd(m.repo, m.projectID, m.projectName, false))
+			return m, tea.Batch(loadTreeCmd(m.repo, false), m.reloadCurrentTasks(false))
 		}
 		if msg.count > 1 {
 			m.toast = fmt.Sprintf("%s moved %d tasks to %s", iconCheck, msg.count, msg.destName)
 		} else {
 			m.toast = iconCheck + " moved to " + msg.destName
 		}
-		return m, tea.Batch(loadTreeCmd(m.repo, false), loadTasksCmd(m.repo, m.projectID, m.projectName, false))
+		return m, tea.Batch(loadTreeCmd(m.repo, false), m.reloadCurrentTasks(false))
+
+	case taskTitleCopiedMsg:
+		if msg.err != nil {
+			m.errMsg = msg.err.Error()
+			return m, nil
+		}
+		m.toast = iconCheck + " copied \"" + copiedTitleToast(msg.title) + "\""
+		return m, nil
 
 	case taskDeletedMsg:
 		m.clearTaskMarks()
@@ -1361,7 +1589,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.toast = fmt.Sprintf("%s %s %d task(s); remaining operation failed", iconCheck, msg.op, msg.count)
 			}
 			m.errMsg = msg.err.Error()
-			return m, loadTasksCmd(m.repo, m.projectID, m.projectName, false)
+			return m, m.reloadCurrentTasks(false)
 		}
 		switch msg.op {
 		case "restore":
@@ -1371,7 +1599,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			m.toast = fmt.Sprintf("%s moved %d task(s) to Trash", iconCheck, msg.count)
 		}
-		return m, loadTasksCmd(m.repo, m.projectID, m.projectName, false)
+		return m, m.reloadCurrentTasks(false)
 
 	case taskRecreatedMsg:
 		if msg.archiveRecords != nil {
@@ -1388,7 +1616,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.repo.InvalidateTasks(m.projectID)
 		}
 		m.toast = iconCheck + " archived task recreated as a new task"
-		return m, loadTasksCmd(m.repo, m.projectID, m.projectName, false)
+		return m, m.reloadCurrentTasks(false)
 
 	case taskCheckinMsg:
 		m.pendingCheckin = ""
@@ -1416,7 +1644,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, tea.Batch(
-			loadTasksCmd(m.repo, m.projectID, m.projectName, false),
+			m.reloadCurrentTasks(false),
 			loadCalendarViewCmd(m.repo, m.calDate, m.calMode, false, m.uiSettings.weekStartsMonday()),
 		)
 
@@ -1468,12 +1696,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.repo.InvalidateTree()
 		}
 		m.toast = iconCheck + " deleted " + msg.name
-		if msg.kind == "list" && strings.EqualFold(m.projectName, msg.name) {
+		if msg.canUndo {
+			m.toast += " · u undo"
+		}
+		deletedCurrent := msg.kind == "list" && msg.id != "" && m.projectID == msg.id
+		if !deletedCurrent && msg.kind == "list" && msg.id == "" && strings.EqualFold(m.projectName, msg.name) {
+			deletedCurrent = true
+		}
+		if deletedCurrent {
 			m.projectID = ""
 			m.projectName = ""
 			m.tasks = nil
+			m.invalidateVisibleRows()
 		}
-		return m, tea.Batch(loadTreeCmd(m.repo, false), loadTasksCmd(m.repo, m.projectID, m.projectName, false))
+		return m, tea.Batch(loadTreeCmd(m.repo, false), m.reloadCurrentTasks(false))
+
+	case listRestoredMsg:
+		if msg.err != nil && msg.projectID == "" {
+			m.errMsg = msg.err.Error()
+			return m, nil
+		}
+		if m.repo != nil {
+			m.repo.InvalidateTree()
+		}
+		if msg.kind == "folder" {
+			m.toast = fmt.Sprintf("%s restored folder %s", iconCheck, msg.name)
+		} else {
+			m.toast = fmt.Sprintf("%s restored %s · %d tasks", iconCheck, msg.name, msg.tasks)
+		}
+		if msg.err != nil {
+			m.errMsg = msg.err.Error()
+		}
+		if msg.kind != "folder" && msg.projectID != "" {
+			m.pendingSelectListID = msg.projectID
+		}
+		return m, loadTreeCmd(m.repo, false)
 
 	case listRenamedMsg:
 		m.mode = modeNormal
@@ -1489,7 +1746,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.kind == "list" && m.projectID != "" && strings.EqualFold(m.projectName, msg.oldName) {
 			m.projectName = msg.newName
 		}
-		return m, tea.Batch(loadTreeCmd(m.repo, false), loadTasksCmd(m.repo, m.projectID, m.projectName, false))
+		return m, tea.Batch(loadTreeCmd(m.repo, false), m.reloadCurrentTasks(false))
+
+	case aiRewriteMsg, askAppliedMsg:
+		next, cmd, _ := m.handleAskMsg(msg)
+		return next, cmd
 
 	case taskUpdatedMsg:
 		m.mode = modeNormal
@@ -1503,7 +1764,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.repo.InvalidateTasks(m.projectID)
 		}
 		m.toast = fmt.Sprintf("%s updated %q", iconCheck, msg.title)
-		return m, loadTasksCmd(m.repo, m.projectID, m.projectName, false)
+		return m, m.reloadCurrentTasks(false)
 
 	case taskRenamedMsg:
 		m.mode = modeNormal
@@ -1516,7 +1777,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.repo.InvalidateTasks(m.projectID)
 		}
 		m.toast = fmt.Sprintf("renamed task → %q", msg.newTitle)
-		return m, loadTasksCmd(m.repo, m.projectID, m.projectName, false)
+		return m, m.reloadCurrentTasks(false)
 
 	case calLoadedMsg:
 		m.loading = false
@@ -1853,7 +2114,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		m.pomoNowTick = time.Now()
+		now := time.Time(msg)
+		m.pomoNowTick = now
+		m = m.expireError(now)
 		if m.view == viewPomodoro && m.pomoFollowNow {
 			m.centerPomoTimelineOnNow()
 		}
@@ -1993,6 +2256,7 @@ func (m model) switchView(v appView) (model, tea.Cmd) {
 	m.addInput.Blur()
 	m.blurTaskFormInputs()
 	m.filterInput.Blur()
+	m.listSearchInput.Blur()
 	m.renameInput.Blur()
 
 	m.uiSettings.LastView = appViewName(v)
@@ -2051,7 +2315,7 @@ func (m model) refreshView() (model, tea.Cmd) {
 	default:
 		return m, tea.Batch(
 			loadTreeCmd(m.repo, true),
-			loadTasksCmd(m.repo, m.projectID, m.projectName, true),
+			m.reloadCurrentTasks(true),
 			loadTodayPomoCmd(m.repo, true),
 			loadPomoHistoryCmd(m.repo, true),
 		)
@@ -2134,7 +2398,7 @@ func (m model) updatePermanentDeleteConfirmation(msg tea.KeyMsg) (model, tea.Cmd
 		m.pendingPermanentDelete = nil
 		m.mode = modeNormal
 		m.toast = "archiving before permanent deletion…"
-		return m, permanentlyDeleteTasksCmd(m.client, m.archiveStore, tasks, m.projectID)
+		return m, permanentlyDeleteTasksCmd(m.client, m.archiveStore, tasks, m.taskWriteFallback())
 	case "n", "N", "esc":
 		m.pendingPermanentDelete = nil
 		m.mode = modeNormal
@@ -2146,12 +2410,35 @@ func (m model) updatePermanentDeleteConfirmation(msg tea.KeyMsg) (model, tea.Cmd
 
 func (m model) updateTasksKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	switch msg.String() {
+	case "esc":
+		if strings.TrimSpace(m.filterInput.Value()) != "" {
+			m.filterInput.SetValue("")
+			m.applyFilter()
+			m.toast = "search cleared"
+			return m, nil
+		}
+		return m, nil
 	case "l":
 		m.paneFocus = paneTasks
 		return m, nil
 	case "h", "shift+tab":
 		m.paneFocus = paneLists
 		return m, nil
+	case "y":
+		if m.paneFocus != paneTasks {
+			return m, nil
+		}
+		t, ok := m.selectedTask()
+		if !ok {
+			m.errMsg = "select a task to copy"
+			return m, nil
+		}
+		title := strings.TrimSpace(t.Title)
+		if title == "" {
+			m.errMsg = "task has no title"
+			return m, nil
+		}
+		return m, copyTaskTitleCmd(title)
 	case "e":
 		if m.paneFocus == paneTasks {
 			t, ok := m.selectedTask()
@@ -2185,7 +2472,7 @@ func (m model) updateTasksKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.openAddListFolderPicker()
 			return m, nil
 		}
-		if m.projectID == "" {
+		if m.projectID == "" || isSmartList(m.projectID) || m.showsTaskListName() {
 			m.errMsg = "select a list first"
 			return m, nil
 		}
@@ -2219,6 +2506,11 @@ func (m model) updateTasksKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, nil
 		}
 		return m, nil
+	case "i":
+		if m.paneFocus == paneTasks {
+			return m.beginAskAI()
+		}
+		return m, nil
 	case " ":
 		if m.paneFocus == paneTasks {
 			return m.toggleTaskMarkAndAdvance(), nil
@@ -2238,6 +2530,29 @@ func (m model) updateTasksKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		if m.paneFocus == paneTasks && m.markedTaskCount() > 0 {
 			return m.clearTaskMarks(), nil
 		}
+		if m.paneFocus == paneLists {
+			if m.listStore == nil || m.client == nil {
+				m.errMsg = "nothing to undo"
+				return m, nil
+			}
+			return m, undoDeletedListCmd(m.client, m.listStore)
+		}
+		return m, nil
+	case "w":
+		if m.paneFocus != paneTasks {
+			return m, nil
+		}
+		if m.viewingTrash() || m.selectionIsTrashed() {
+			m.errMsg = "task is in trash"
+			return m, nil
+		}
+		if toAbandon := m.tasksToAbandon(); len(toAbandon) > 0 {
+			return m, abandonTasksCmd(m.client, toAbandon, m.taskWriteFallback())
+		}
+		if toReopen := m.tasksToUndoWontDo(); len(toReopen) > 0 {
+			return m, reopenAbandonedTasksCmd(m.client, toReopen, m.taskWriteFallback())
+		}
+		m.errMsg = "select an open task"
 		return m, nil
 	case "x":
 		if m.paneFocus == paneTasks {
@@ -2264,49 +2579,22 @@ func (m model) updateTasksKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		if m.paneFocus != paneLists {
 			return m, nil
 		}
-		row, ok := m.currentListRowForRename()
-		if !ok {
-			m.errMsg = "select a list or folder to delete"
-			return m, nil
-		}
-		ref := row.node.Name
-		if row.node.ID != "" {
-			ref = row.node.ID
-		}
-		return m, deleteListOrFolderCmd(m.client, row.node.Kind, ref)
-	case "backspace":
-		if m.paneFocus == paneTasks {
-			toDelete := m.tasksToDelete()
-			if len(toDelete) == 0 {
-				return m, nil
-			}
-			switch m.effectiveTaskScope() {
-			case TaskScopeArchive:
-				m.errMsg = "archive records are durable recovery snapshots"
-				return m, nil
-			case TaskScopeTrash:
-				m.pendingPermanentDelete = toDelete
-				m.mode = modeConfirmDelete
-				m.toast = fmt.Sprintf("permanently delete %d task(s)?", len(toDelete))
-				return m, nil
-			default:
-				return m, trashTasksCmd(m.client, toDelete, m.projectID)
+		return m.deleteFocusedList()
+	case "backspace", "ctrl+h", "delete":
+		if m.paneFocus == paneLists {
+			if _, ok := m.currentListRowForRename(); ok {
+				return m.deleteFocusedList()
 			}
 		}
-		if m.paneFocus != paneLists {
-			return m, nil
-		}
-		row, ok := m.currentListRowForRename()
-		if !ok {
-			m.errMsg = "select a list or folder to delete"
-			return m, nil
-		}
-		ref := row.node.Name
-		if row.node.ID != "" {
-			ref = row.node.ID
-		}
-		return m, deleteListOrFolderCmd(m.client, row.node.Kind, ref)
+		return m.trashSelectedTasks()
 	case "/":
+		if m.paneFocus == paneLists {
+			m.mode = modeListSearch
+			m.listSearchInput.SetValue("")
+			m.listSearchCursor = 0
+			m.listSearchInput.Focus()
+			return m, textinput.Blink
+		}
 		m.mode = modeFilter
 		m.filterInput.Focus()
 		return m, textinput.Blink
@@ -2361,12 +2649,12 @@ func (m model) updateTasksKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.toast = "recreating archived task…"
 			return m, recreateArchivedTaskCmd(m.client, m.archiveStore, record)
 		}
-		if m.effectiveTaskScope() == TaskScopeTrash {
+		if m.viewingTrash() || m.selectionIsTrashed() {
 			toRestore := m.tasksToDelete()
 			if len(toRestore) == 0 {
 				return m, nil
 			}
-			return m, restoreTasksCmd(m.client, toRestore, m.projectID)
+			return m, restoreTasksCmd(m.client, toRestore, m.taskWriteFallback())
 		}
 		if toReopen := m.tasksToReopen(); len(toReopen) > 0 {
 			for _, task := range toReopen {
@@ -2375,7 +2663,7 @@ func (m model) updateTasksKey(msg tea.KeyMsg) (model, tea.Cmd) {
 					return m, nil
 				}
 			}
-			return m, reopenTasksCmd(m.client, toReopen, m.projectID)
+			return m, reopenTasksCmd(m.client, toReopen, m.taskWriteFallback())
 		}
 		toComplete := m.tasksToComplete()
 		if len(toComplete) == 0 {
@@ -2387,13 +2675,13 @@ func (m model) updateTasksKey(msg tea.KeyMsg) (model, tea.Cmd) {
 				return m, nil
 			}
 		}
-		return m, completeTasksCmd(m.client, toComplete, m.projectID)
+		return m, completeTasksCmd(m.client, toComplete, m.taskWriteFallback())
 	case "j", "down":
 		if m.paneFocus == paneLists {
 			m.listCursor = m.nextListCursor(1)
 			return m.beginListLoad()
 		}
-		m.taskCursor = min(m.taskCursor+1, len(m.visibleTasks())-1)
+		m.taskCursor = min(m.taskCursor+1, m.visibleTaskCount()-1)
 		return m, nil
 	case "k", "up":
 		if m.paneFocus == paneLists {
@@ -2414,9 +2702,8 @@ func (m model) updateTasksKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			}
 			return m.beginListLoad()
 		}
-		tasks := m.visibleTasks()
-		if len(tasks) > 0 {
-			m.taskCursor = min(m.taskCursor+page, len(tasks)-1)
+		if n := m.visibleTaskCount(); n > 0 {
+			m.taskCursor = min(m.taskCursor+page, n-1)
 		}
 		return m, nil
 	case "pgup", "ctrl+u":
@@ -2441,12 +2728,19 @@ func (m model) updateTasksKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.taskCursor = 0
 		return m, nil
 	case "G":
-		if m.paneFocus == paneTasks && len(m.visibleTasks()) > 0 {
-			m.taskCursor = len(m.visibleTasks()) - 1
+		if n := m.visibleTaskCount(); m.paneFocus == paneTasks && n > 0 {
+			m.taskCursor = n - 1
 		}
 		return m, nil
 	}
 	return m, nil
+}
+
+func calendarViewCmd(m model) tea.Cmd {
+	return tea.Batch(
+		loadCalendarViewCmd(m.repo, m.calDate, m.calMode, false, m.uiSettings.weekStartsMonday()),
+		func() tea.Msg { return tea.ClearScreen() },
+	)
 }
 
 func (m model) updateCalKey(msg tea.KeyMsg) (model, tea.Cmd) {
@@ -2479,28 +2773,28 @@ func (m model) updateCalKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.calGridCursor = 0
 		m.calDayCenterNow = true
 		m.calWeekViewport = 0
-		return m, loadCalendarViewCmd(m.repo, m.calDate, m.calMode, false, m.uiSettings.weekStartsMonday())
+		return m, calendarViewCmd(m)
 	case "w":
 		m.calMode = calModeWeek
 		m.calTaskCursor = 0
 		m.calGridCursor = 0
 		m.calDayCenterNow = false
 		m.calWeekViewport = 0
-		return m, loadCalendarViewCmd(m.repo, m.calDate, m.calMode, false, m.uiSettings.weekStartsMonday())
+		return m, calendarViewCmd(m)
 	case "m":
 		m.calMode = calModeMonth
 		m.calTaskCursor = 0
 		m.calGridCursor = 0
 		m.calDayCenterNow = false
 		m.calWeekViewport = 0
-		return m, loadCalendarViewCmd(m.repo, m.calDate, m.calMode, false, m.uiSettings.weekStartsMonday())
+		return m, calendarViewCmd(m)
 	case "y":
 		m.calMode = calModeYear
 		m.calTaskCursor = 0
 		m.calGridCursor = 0
 		m.calDayCenterNow = false
 		m.calWeekViewport = 0
-		return m, loadCalendarViewCmd(m.repo, m.calDate, m.calMode, false, m.uiSettings.weekStartsMonday())
+		return m, calendarViewCmd(m)
 	case "t":
 		m.calDate = dateOnly(time.Now())
 		m.calTaskCursor = 0
@@ -2536,7 +2830,7 @@ func (m model) updateCalKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		out := m.calDrillDown()
-		return out, loadCalendarViewCmd(out.repo, out.calDate, out.calMode, false, out.uiSettings.weekStartsMonday())
+		return out, calendarViewCmd(out)
 	case "[", "left":
 		out := m.calNavPrev()
 		return out, loadCalendarViewCmd(out.repo, out.calDate, out.calMode, false, out.uiSettings.weekStartsMonday())
@@ -3077,6 +3371,76 @@ func (m model) updateRename(msg tea.KeyMsg) (model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m model) updateListSearch(msg tea.KeyMsg) (model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = modeNormal
+		m.listSearchInput.Blur()
+		m.listSearchInput.SetValue("")
+		m.listSearchCursor = 0
+		return m, nil
+	case "enter":
+		matches := m.listSearchMatches()
+		if len(matches) == 0 {
+			m.errMsg = "no matching list"
+			return m, nil
+		}
+		if m.listSearchCursor < 0 || m.listSearchCursor >= len(matches) {
+			m.listSearchCursor = 0
+		}
+		m.listCursor = matches[m.listSearchCursor]
+		m.mode = modeNormal
+		m.listSearchInput.Blur()
+		m.listSearchInput.SetValue("")
+		m.listSearchCursor = 0
+		m.paneFocus = paneTasks
+		return m.beginListLoad()
+	case "up", "ctrl+p":
+		matches := m.listSearchMatches()
+		if len(matches) == 0 {
+			return m, nil
+		}
+		m.listSearchCursor--
+		if m.listSearchCursor < 0 {
+			m.listSearchCursor = len(matches) - 1
+		}
+		return m, nil
+	case "down", "ctrl+n":
+		matches := m.listSearchMatches()
+		if len(matches) == 0 {
+			return m, nil
+		}
+		m.listSearchCursor++
+		if m.listSearchCursor >= len(matches) {
+			m.listSearchCursor = 0
+		}
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.listSearchInput, cmd = m.listSearchInput.Update(msg)
+	matches := m.listSearchMatches()
+	if len(matches) == 0 {
+		m.listSearchCursor = 0
+	} else if m.listSearchCursor >= len(matches) {
+		m.listSearchCursor = 0
+	}
+	return m, cmd
+}
+
+func (m model) listSearchMatches() []int {
+	query := strings.ToLower(strings.TrimSpace(m.listSearchInput.Value()))
+	var matches []int
+	for i, row := range m.listRows {
+		if !row.selectable {
+			continue
+		}
+		if query == "" || strings.Contains(strings.ToLower(row.node.Name), query) {
+			matches = append(matches, i)
+		}
+	}
+	return matches
+}
+
 func (m model) updateFilter(msg tea.KeyMsg) (model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
@@ -3090,15 +3454,38 @@ func (m model) updateFilter(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.filterInput.Blur()
 		m.applyFilter()
 		return m, nil
+	case "up", "ctrl+p", "pgup":
+		step := 1
+		if msg.String() == "pgup" {
+			step = m.scrollPageSize()
+		}
+		m.taskCursor = max(m.taskCursor-step, 0)
+		return m, nil
+	case "down", "ctrl+n", "pgdown":
+		step := 1
+		if msg.String() == "pgdown" {
+			step = m.scrollPageSize()
+		}
+		n := m.visibleTaskCount()
+		if n == 0 {
+			m.taskCursor = 0
+			return m, nil
+		}
+		m.taskCursor = min(m.taskCursor+step, n-1)
+		return m, nil
 	}
 	var cmd tea.Cmd
+	prev := m.filterInput.Value()
 	m.filterInput, cmd = m.filterInput.Update(msg)
+	if m.filterInput.Value() != prev {
+		m.taskCursor = 0
+	}
 	m.applyFilter()
 	return m, cmd
 }
 
 func (m *model) applyFilter() {
-	n := len(m.visibleTasks())
+	n := m.visibleTaskCount()
 	if m.taskCursor >= n {
 		m.taskCursor = max(n-1, 0)
 	}
@@ -3122,16 +3509,81 @@ func (m model) taskCounts() (open, done, trashed int) {
 	return open, done, trashed
 }
 
-func (m model) visibleTaskRows() []taskListRow {
-	if m.effectiveTaskScope() == TaskScopeArchive {
-		return m.archiveTaskRows()
+type visibleRowsCacheKey struct {
+	stamp   uint64
+	scope   TaskScope
+	sort    TaskSortMode
+	filter  string
+	project string
+}
+
+func (m *model) invalidateVisibleRows() {
+	m.visibleRowsReady = false
+	m.visibleRows = nil
+}
+
+func taskListStamp(tasks []ticktick.Task) uint64 {
+	h := uint64(14695981039346656037)
+	h ^= uint64(len(tasks))
+	h *= 1099511628211
+	for i := range tasks {
+		task := &tasks[i]
+		h = stampString(h, task.ID)
+		h = stampString(h, task.ParentID)
+		h = stampString(h, task.Title)
+		h ^= uint64(task.Status.Int())
+		h *= 1099511628211
+		h ^= uint64(task.Deleted.Int())
+		h *= 1099511628211
+		h ^= uint64(task.SortOrder)
+		h *= 1099511628211
+		for _, id := range task.ChildIDs {
+			h = stampString(h, id)
+		}
 	}
-	return buildVisibleTaskRowsForScope(
-		m.tasks,
-		m.taskSortMode,
-		m.effectiveTaskScope(),
-		m.filterInput.Value(),
-	)
+	return h
+}
+
+func stampString(h uint64, s string) uint64 {
+	h ^= uint64(len(s))
+	h *= 1099511628211
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= 1099511628211
+	}
+	return h
+}
+
+func (m *model) visibleTaskRows() []taskListRow {
+	if m.effectiveTaskScope() == TaskScopeArchive && !isSmartList(m.projectID) {
+		rows := m.archiveTaskRows()
+		m.visibleFocusColW = maxTaskFocusInlineW(*m, rows)
+		return rows
+	}
+	scope := m.effectiveTaskScope()
+	if isSmartList(m.projectID) || m.showsTaskListName() {
+		scope = TaskScopeAll
+	}
+	key := visibleRowsCacheKey{
+		stamp:   taskListStamp(m.tasks),
+		scope:   scope,
+		sort:    m.taskSortMode,
+		filter:  m.filterInput.Value(),
+		project: m.projectID,
+	}
+	if m.visibleRowsReady && m.visibleRowsKey == key {
+		return m.visibleRows
+	}
+	rows := buildVisibleTaskRowsForScope(m.tasks, m.taskSortMode, scope, key.filter)
+	m.visibleRows = rows
+	m.visibleRowsKey = key
+	m.visibleRowsReady = true
+	m.visibleFocusColW = maxTaskFocusInlineW(*m, rows)
+	return rows
+}
+
+func (m *model) visibleTaskCount() int {
+	return len(m.visibleTaskRows())
 }
 
 func (m model) visibleTasks() []ticktick.Task {
@@ -3165,6 +3617,7 @@ func (m model) beginListLoad() (model, tea.Cmd) {
 	if row, ok := m.currentListRow(); ok {
 		m.projectID = row.node.ID
 		m.projectName = row.node.Name
+		m.rememberSelectedList(row.node.ID)
 	}
 	cmds := []tea.Cmd{func() tea.Msg { return tea.ClearScreen() }}
 	if load := m.loadCurrentList(); load != nil {
@@ -3174,17 +3627,64 @@ func (m model) beginListLoad() (model, tea.Cmd) {
 }
 
 func (m model) loadCurrentList() tea.Cmd {
+	return m.reloadCurrentTasks(false)
+}
+
+func (m model) reloadCurrentTasks(force bool) tea.Cmd {
 	row, ok := m.currentListRow()
 	if !ok {
-		return nil
+		return loadTasksCmd(m.repo, m.projectID, m.projectName, force)
 	}
-	return loadTasksCmd(m.repo, row.node.ID, row.node.Name, false)
+	switch {
+	case row.node.Kind == "folder":
+		return loadFolderTasksCmd(m.repo, row.node.ID, row.node.Name, m.folderChildListIDs(m.listCursor), force)
+	case row.node.ID == allTasksID:
+		return loadAllTasksCmd(m.repo, force)
+	case row.node.Kind == "smart":
+		return loadSmartTasksCmd(m.repo, row.node.ID, row.node.Name, force)
+	default:
+		return loadTasksCmd(m.repo, row.node.ID, row.node.Name, force)
+	}
+}
+
+func (m model) taskWriteFallback() string {
+	if m.showsTaskListName() || isSmartList(m.projectID) || !realListID(m.projectID) {
+		return ""
+	}
+	return m.projectID
+}
+
+func (m model) trashSelectedTasks() (model, tea.Cmd) {
+	toDelete := m.tasksToDelete()
+	if len(toDelete) == 0 {
+		m.errMsg = "select a task to delete"
+		return m, nil
+	}
+	switch {
+	case m.effectiveTaskScope() == TaskScopeArchive:
+		m.errMsg = "archive records are durable recovery snapshots"
+		return m, nil
+	case m.viewingTrash():
+		m.pendingPermanentDelete = toDelete
+		m.mode = modeConfirmDelete
+		m.toast = fmt.Sprintf("permanently delete %d task(s)?", len(toDelete))
+		return m, nil
+	default:
+		return m, trashTasksCmd(m.client, toDelete, m.taskWriteFallback())
+	}
 }
 
 func buildListRows(tree []ticktick.ProjectTreeNode) []listRow {
-	out := make([]listRow, len(tree))
-	for i, n := range tree {
-		out[i] = listRow{node: n, selectable: n.Kind == "list"}
+	out := make([]listRow, 0, len(tree)+len(smartListNodes())+1)
+	out = append(out, listRow{
+		node:       ticktick.ProjectTreeNode{Kind: "all", ID: allTasksID, Name: "All"},
+		selectable: true,
+	})
+	for _, n := range tree {
+		out = append(out, listRow{node: n, selectable: n.Kind == "list" || n.Kind == "folder"})
+	}
+	for _, n := range smartListNodes() {
+		out = append(out, listRow{node: n, selectable: n.Kind == "smart"})
 	}
 	return out
 }
@@ -3219,6 +3719,32 @@ func (m model) currentListRowForRename() (listRow, bool) {
 		return listRow{}, false
 	}
 	return r, true
+}
+
+func (m *model) selectListByID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for i, row := range m.listRows {
+		if row.node.ID == id && row.selectable {
+			m.listCursor = i
+			return true
+		}
+	}
+	return false
+}
+
+func (m *model) rememberSelectedList(id string) {
+	if id == "" || m.uiSettings.LastListID == id {
+		return
+	}
+	m.uiSettings.LastListID = id
+	if flag.Lookup("test.v") != nil {
+		return
+	}
+	if err := saveUISettings(m.uiSettings); err != nil {
+		m.errMsg = err.Error()
+	}
 }
 
 func (m model) firstListCursor() int {

@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/j4y-w4lk3r/ttcli/internal/tasktext"
 	"github.com/j4y-w4lk3r/ttcli/internal/ticktick"
 )
 
@@ -104,7 +105,10 @@ func taskDetailPanelOpts(t ticktick.Task, focusFn func(ticktick.Task) (ticktick.
 	if t.Trashed() {
 		meta = append(meta, "trashed")
 	}
-	if t.Done() {
+	switch {
+	case t.WontDo():
+		meta = append(meta, "won't do")
+	case t.Done():
 		meta = append(meta, "completed")
 	}
 	if t.IsSubtask() {
@@ -202,27 +206,6 @@ func wrapStyledLines(text string, width int, style lipgloss.Style, prefix string
 	return lines
 }
 
-func stripTaskHTML(s string) string {
-	s = strings.ReplaceAll(s, "<br>", "\n")
-	s = strings.ReplaceAll(s, "<br/>", "\n")
-	s = strings.ReplaceAll(s, "<br />", "\n")
-	var b strings.Builder
-	inTag := false
-	for _, r := range s {
-		switch {
-		case r == '<':
-			inTag = true
-		case r == '>':
-			inTag = false
-		case !inTag:
-			b.WriteRune(r)
-		}
-	}
-	return strings.TrimSpace(b.String())
-}
+func stripTaskHTML(s string) string { return tasktext.Strip(s) }
 
-func taskNotesToHTML(s string) string {
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	s = strings.ReplaceAll(s, "\r", "\n")
-	return strings.ReplaceAll(strings.TrimSpace(s), "\n", "<br/>")
-}
+func taskNotesToHTML(s string) string { return tasktext.ToHTML(s) }

@@ -43,7 +43,7 @@ func printHelp(w io.Writer) {
 	title := paint(w, c, ansiBold+ansiCyan, "ttcli") + " — TickTick from the terminal\n\n"
 
 	sections := []struct {
-		head string
+		head  string
 		lines []string
 	}{
 		{
@@ -76,6 +76,7 @@ func printHelp(w io.Writer) {
 			head: "focus & misc",
 			lines: []string{
 				"ttcli tui                tasks · calendar · pomo · habits",
+				"ttcli mcp                AI tools: search, read, retitle, rewrite notes",
 				"ttcli focus [DATE]       pomodoro summary",
 				"ttcli focus start|stop|repeat   live timer + TickTick log",
 				"ttcli pomo               short focus line (tmux)",

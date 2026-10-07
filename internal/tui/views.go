@@ -228,11 +228,7 @@ func (m model) footerStatus() string {
 	}
 	switch m.view {
 	case viewCalendar:
-		n := 0
-		for _, entries := range m.calIdx().byDate {
-			n += len(entries)
-		}
-		return fmt.Sprintf("calendar · %d items", n)
+		return m.calendarFooter()
 	case viewPomodoro:
 		if line := activeFocusFooterLine(loadActiveFocusSession()); line != "" {
 			return line
@@ -257,11 +253,11 @@ func (m model) footerStatus() string {
 		}
 		if m.projectName != "" {
 			total, matching, shown := m.taskScopeStats()
-			parts := []string{
-				m.projectName,
-				strings.ToLower(m.effectiveTaskScope().Label()),
-				fmt.Sprintf("%d total", total),
+			parts := []string{m.projectName}
+			if !isSmartList(m.projectID) {
+				parts = append(parts, strings.ToLower(m.effectiveTaskScope().Label()))
 			}
+			parts = append(parts, fmt.Sprintf("%d total", total))
 			if strings.TrimSpace(m.filterInput.Value()) != "" {
 				parts = append(parts, fmt.Sprintf("%d matching", matching))
 			}
@@ -270,6 +266,25 @@ func (m model) footerStatus() string {
 		}
 		return fmt.Sprintf("%d lists", len(m.selectableLists()))
 	}
+}
+
+func (m model) calendarFooter() string {
+	label := "calendar"
+	switch m.calMode {
+	case calModeDay:
+		label = "day"
+	case calModeWeek:
+		label = "week"
+	case calModeMonth:
+		label = "month"
+	case calModeYear:
+		label = "year"
+	}
+	day := m.calDate
+	if day.IsZero() {
+		day = time.Now()
+	}
+	return label + " · " + day.Format("Mon 2 Jan")
 }
 
 func footerHint(v appView) string {

@@ -240,8 +240,9 @@ func buildCalDayTimelineWithLogged(
 		for _, item := range items {
 			sum.mins += item.estimate.Minutes
 		}
-		busy := len(items) > 0 || (isToday && nowSlot == hour)
-		rows = append(rows, calDayRow{hourLabel: label, kind: "slot", slotBusy: busy, slotSummary: sum})
+		if len(items) == 0 {
+			rows = append(rows, calDayRow{hourLabel: label, kind: "slot", slotSummary: sum})
+		}
 		for j, item := range items {
 			if isToday && !nowPlaced && nowSlot == hour && now.Before(item.start) {
 				rows = append(rows, calDayRow{kind: "now"})
@@ -324,14 +325,14 @@ func renderCalTaskRow(row calDayRow, day, now time.Time, selected bool, width in
 
 	titleSt := listIdleStyle
 	if entry.Done() {
-		titleSt = taskDoneStyle
+		titleSt = closedTaskStyle(t)
 	} else if overdue {
 		titleSt = dueOverStyle
 	}
 	if selected {
 		titleSt = taskSelStyle
 		if entry.Done() {
-			titleSt = taskDoneStyle.Bold(true)
+			titleSt = closedTaskStyle(t).Bold(true)
 		} else if overdue {
 			titleSt = dueOverStyle.Bold(true)
 		}
@@ -383,8 +384,7 @@ func renderCalTaskRow(row calDayRow, day, now time.Time, selected bool, width in
 		return renderDayTimelineEntryBody("", body, "", width, pomoTimelineLayout{})
 	default:
 		clock := row.hourLabel
-		conn := dayPomoConnector(row.slotIndex, row.slotCount, selected)
-		body := conn + " " + dot + " " + titleSt.Render(marker+" "+title) + local
+		body := dot + " " + titleSt.Render(marker+" "+title) + local
 		if p := t.PriorityLabel(); p != "-" {
 			body += " " + prioStyle(p).Render(p)
 		}
@@ -405,25 +405,53 @@ func renderCalTaskRow(row calDayRow, day, now time.Time, selected bool, width in
 }
 
 func renderCalDayTaskContinuation(row calDayRow, selected, last bool, width int) string {
-	style := listIdleStyle
+	color := calDayBlockColor(row)
 	if selected {
-		style = taskSelStyle
+		color = colorGreen
 	}
-	border := "│"
-	detail := calendarEstimateLabel(row.estimate) + " planned"
-	if row.logged {
-		detail = calendarEstimateLabel(row.estimate) + " logged"
-	}
+	mark := "┃"
 	if last {
-		border = "╰─"
-		if !row.end.IsZero() {
-			detail = "ends " + row.end.Format("15:04")
+		mark = "┗"
+	}
+	rail := lipgloss.NewStyle().Foreground(color).Render(mark)
+	body := rail
+	if last && !row.end.IsZero() {
+		label := "until " + row.end.Format("15:04")
+		text := hintStyle.Render(label)
+		if selected {
+			text = taskSelStyle.Render(label)
+		}
+		body += " " + text
+	} else {
+		trackW := 18
+		room := dayTimelineContentW(width) - 2
+		if room < trackW {
+			trackW = room
+		}
+		if trackW < 4 {
+			trackW = 4
+		}
+		track := strings.Repeat("·", trackW)
+		if selected {
+			body += taskSelStyle.Render(track)
+		} else {
+			body += lipgloss.NewStyle().Foreground(colorSubtext).Render(track)
 		}
 	}
-	rail := lipgloss.NewStyle().
-		Foreground(taskPriorityColor(row.entry.Task.Priority.Int())).
-		Render(border)
-	return renderDayTimelineEntryBody("", "  "+rail+" "+style.Render(detail), "", width, pomoTimelineLayout{})
+	return renderDayTimelineEntryBody("", body, "", width, pomoTimelineLayout{})
+}
+
+func calDayBlockColor(row calDayRow) lipgloss.Color {
+	if row.logged {
+		return colorMauve
+	}
+	if row.entry.Done() {
+		return colorTeal
+	}
+	if p := row.entry.Task.Priority.Int(); p != 0 {
+		return taskPriorityColor(p)
+	}
+	return colorMauve
 }
 
 func (m *model) syncCalTaskFromGrid(rows []calDayRow) {

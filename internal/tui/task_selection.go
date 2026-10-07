@@ -171,7 +171,47 @@ func (m model) markedTasksHint() string {
 		return ""
 	}
 	if n == 1 {
-		return "1 marked · d done · m move · Backspace delete · u clear"
+		return "1 marked · d done · w won't do · m move · Backspace delete · u clear"
 	}
-	return fmt.Sprintf("%d marked · d done · m move · Backspace delete · u clear", n)
+	return fmt.Sprintf("%d marked · d done · w won't do · m move · Backspace delete · u clear", n)
+}
+
+func (m model) tasksToAbandon() []ticktick.Task {
+	tasks := m.visibleTasks()
+	var marked []ticktick.Task
+	for _, task := range tasks {
+		if m.isTaskMarked(task.ID) && !task.Done() && !task.Trashed() {
+			marked = append(marked, task)
+		}
+	}
+	if len(marked) > 0 {
+		return marked
+	}
+	if m.taskCursor >= 0 && m.taskCursor < len(tasks) {
+		task := tasks[m.taskCursor]
+		if !task.Done() && !task.Trashed() {
+			return []ticktick.Task{task}
+		}
+	}
+	return nil
+}
+
+func (m model) tasksToUndoWontDo() []ticktick.Task {
+	tasks := m.visibleTasks()
+	var marked []ticktick.Task
+	for _, task := range tasks {
+		if m.isTaskMarked(task.ID) && task.WontDo() {
+			marked = append(marked, task)
+		}
+	}
+	if len(marked) > 0 {
+		return marked
+	}
+	if m.taskCursor >= 0 && m.taskCursor < len(tasks) {
+		task := tasks[m.taskCursor]
+		if task.WontDo() {
+			return []ticktick.Task{task}
+		}
+	}
+	return nil
 }

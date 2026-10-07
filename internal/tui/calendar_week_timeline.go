@@ -223,33 +223,66 @@ func calWeekColumnWidths(fullW int) ([7]int, int) {
 	if contentW < 42 {
 		contentW = 42
 	}
-	widths := calMonthColumnWidths(max(contentW-6, 7))
-	for dayIndex := 1; dayIndex < 7; dayIndex++ {
+	// Each day keeps a leading rule. The rest of the width is the day body.
+	widths := calMonthColumnWidths(max(contentW-7, 7))
+	for dayIndex := 0; dayIndex < 7; dayIndex++ {
 		widths[dayIndex]++
 	}
 	return widths, contentW
 }
 
-var calWeekDividerStyle = lipgloss.NewStyle().Foreground(colorSurface)
+const calWeekDivider = "│"
+
+var calWeekDividerStyle = lipgloss.NewStyle().Foreground(colorMuted)
+
+// calWeekColumnChrome splits a day column into a leading rule, side insets,
+// and the text area. Insets keep hour rails and titles off the rule.
+func calWeekColumnChrome(colW, dayIndex int) (divider, padL, padR, content int) {
+	_ = dayIndex
+	divider = 1
+	remain := colW - divider
+	if remain < 1 {
+		return 0, 0, 0, max(colW, 1)
+	}
+	if remain >= 8 {
+		padL = 1
+	}
+	if remain-padL >= 12 {
+		padR = 1
+	}
+	content = remain - padL - padR
+	if content < 1 {
+		content = 1
+	}
+	return
+}
 
 func calWeekCellContentWidth(width, dayIndex int) int {
-	if dayIndex > 0 {
-		return max(width-1, 1)
-	}
-	return max(width, 1)
+	_, _, _, content := calWeekColumnChrome(width, dayIndex)
+	return content
 }
 
 func renderCalWeekColumns(cells [7]string, colW [7]int) string {
-	var parts []string
+	parts := make([]string, 7)
+	widths := make([]int, 7)
 	for dayIndex := 0; dayIndex < 7; dayIndex++ {
-		cellW := calWeekCellContentWidth(colW[dayIndex], dayIndex)
-		cell := padToWidth(truncateRenderedWidth(cells[dayIndex], cellW), cellW)
-		if dayIndex > 0 {
-			cell = calWeekDividerStyle.Render("┊") + cell
+		divider, padL, padR, content := calWeekColumnChrome(colW[dayIndex], dayIndex)
+		cell := padToWidth(truncateRenderedWidth(cells[dayIndex], content), content)
+		var b strings.Builder
+		if divider > 0 {
+			b.WriteString(calWeekDividerStyle.Render(calWeekDivider))
 		}
-		parts = append(parts, padToWidth(cell, colW[dayIndex]))
+		b.WriteString(strings.Repeat(" ", padL))
+		b.WriteString(cell)
+		b.WriteString(strings.Repeat(" ", padR))
+		parts[dayIndex] = b.String()
+		widths[dayIndex] = colW[dayIndex]
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+	total := 0
+	for _, w := range widths {
+		total += w
+	}
+	return joinFixedColumns(parts, widths, total)
 }
 
 func renderCalWeekDayHead(weekStart time.Time, selected time.Time, colW [7]int, contentW int) string {
@@ -289,14 +322,17 @@ func weekTaskCellSegment(row calWeekRow, width int, selected, continuation, last
 		marker = iconPomodoro
 	} else if row.entry.Done() {
 		marker = iconCheck
-		style = taskDoneStyle
+		style = closedTaskStyle(row.entry.Task)
+		if row.entry.Task.WontDo() {
+			marker = iconWont
+		}
 	} else if row.entry.State == calEntryPending {
 		marker = iconRefresh
 	}
 	if selected {
 		style = taskSelStyle
 		if row.entry.Done() {
-			style = taskDoneStyle.Bold(true)
+			style = closedTaskStyle(row.entry.Task).Bold(true)
 		}
 		marker = iconTaskSel
 	}
@@ -395,9 +431,13 @@ func renderCalWeekSlotRow(hour int, weekStart time.Time, idx calIndex, config pl
 			}
 		}
 		cellW := calWeekCellContentWidth(colW[dayIndex], dayIndex)
-		rail := dayEmptySlotStyle.Render(strings.Repeat(dayEmptyRail, cellW))
+		rail := strings.Repeat(" ", cellW)
 		if busy {
-			rail = sectionRuleStyle.Render(strings.Repeat(daySlotRail, cellW))
+			mark := "·"
+			if cellW < 1 {
+				mark = ""
+			}
+			rail = dayEmptySlotStyle.Render(mark + strings.Repeat(" ", max(cellW-1, 0)))
 		}
 		cells[dayIndex] = rail
 	}
@@ -420,11 +460,12 @@ func renderCalWeekNowRow(row calWeekRow, now time.Time, colW [7]int, fullW int) 
 	var cells [7]string
 	for dayIndex := 0; dayIndex < 7; dayIndex++ {
 		cellW := calWeekCellContentWidth(colW[dayIndex], dayIndex)
-		cells[dayIndex] = pomoNowStyle.Render(strings.Repeat("━", cellW))
-		if dayIndex == row.dayIndex {
-			label := "● NOW "
-			cells[dayIndex] = pomoNowStyle.Render(label + strings.Repeat("━", max(cellW-lipgloss.Width(label), 0)))
+		if dayIndex != row.dayIndex {
+			cells[dayIndex] = strings.Repeat(" ", cellW)
+			continue
 		}
+		label := "● NOW "
+		cells[dayIndex] = pomoNowStyle.Render(label + strings.Repeat("━", max(cellW-lipgloss.Width(label), 0)))
 	}
 	return padToWidth(timeCol+dayTimelineGap()+renderCalWeekColumns(cells, colW), fullW)
 }

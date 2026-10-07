@@ -32,23 +32,50 @@ func dedupeTasks(tasks []ticktick.Task) []ticktick.Task {
 	return out
 }
 
-func orderedSubtasks(parent ticktick.Task, tasks []ticktick.Task) []ticktick.Task {
-	byID := make(map[string]ticktick.Task, len(tasks))
-	for _, t := range tasks {
-		byID[t.ID] = t
+type taskChildren struct {
+	byID map[string]ticktick.Task
+	kids map[string][]ticktick.Task
+}
+
+func indexTaskChildren(tasks []ticktick.Task) taskChildren {
+	idx := taskChildren{
+		byID: make(map[string]ticktick.Task, len(tasks)),
+		kids: make(map[string][]ticktick.Task),
 	}
-	seen := map[string]bool{}
-	var out []ticktick.Task
-	for _, id := range parent.ChildIDs {
-		if t, ok := byID[id]; ok && t.ParentID == parent.ID {
-			out = append(out, t)
-			seen[id] = true
+	for _, task := range tasks {
+		if task.ID != "" {
+			idx.byID[task.ID] = task
+		}
+		if task.ParentID != "" {
+			idx.kids[task.ParentID] = append(idx.kids[task.ParentID], task)
 		}
 	}
+	return idx
+}
+
+func orderedSubtasks(parent ticktick.Task, tasks []ticktick.Task) []ticktick.Task {
+	return indexTaskChildren(tasks).ordered(parent)
+}
+
+func (idx taskChildren) ordered(parent ticktick.Task) []ticktick.Task {
+	kids := idx.kids[parent.ID]
+	if len(kids) == 0 && len(parent.ChildIDs) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(parent.ChildIDs))
+	var out []ticktick.Task
+	for _, id := range parent.ChildIDs {
+		task, ok := idx.byID[id]
+		if !ok || task.ParentID != parent.ID {
+			continue
+		}
+		out = append(out, task)
+		seen[id] = true
+	}
 	var rest []ticktick.Task
-	for _, t := range tasks {
-		if t.ParentID == parent.ID && !seen[t.ID] {
-			rest = append(rest, t)
+	for _, task := range kids {
+		if !seen[task.ID] {
+			rest = append(rest, task)
 		}
 	}
 	sort.Slice(rest, func(i, j int) bool {
@@ -57,8 +84,7 @@ func orderedSubtasks(parent ticktick.Task, tasks []ticktick.Task) []ticktick.Tas
 		}
 		return rest[i].Title < rest[j].Title
 	})
-	out = append(out, rest...)
-	return out
+	return append(out, rest...)
 }
 
 func taskRowVisible(t ticktick.Task, showCompleted, showDeleted bool, filter string) bool {
@@ -90,7 +116,7 @@ func taskMatchesFilter(t ticktick.Task, filter string) bool {
 func taskMatchesScope(t ticktick.Task, scope TaskScope) bool {
 	switch normalizeTaskScope(scope) {
 	case TaskScopeDone:
-		return t.Done() && !t.Trashed()
+		return t.Done() && !t.Trashed() && !t.WontDo()
 	case TaskScopeTrash:
 		return t.Trashed()
 	case TaskScopeAll:
@@ -100,12 +126,12 @@ func taskMatchesScope(t ticktick.Task, scope TaskScope) bool {
 	}
 }
 
-func subtreeHasVisibleRow(t ticktick.Task, tasks []ticktick.Task, showCompleted, showDeleted bool, filter string) bool {
+func subtreeHasVisibleRow(t ticktick.Task, idx taskChildren, showCompleted, showDeleted bool, filter string) bool {
 	if taskRowVisible(t, showCompleted, showDeleted, filter) {
 		return true
 	}
-	for _, child := range orderedSubtasks(t, tasks) {
-		if subtreeHasVisibleRow(child, tasks, showCompleted, showDeleted, filter) {
+	for _, child := range idx.ordered(t) {
+		if subtreeHasVisibleRow(child, idx, showCompleted, showDeleted, filter) {
 			return true
 		}
 	}
@@ -115,7 +141,7 @@ func subtreeHasVisibleRow(t ticktick.Task, tasks []ticktick.Task, showCompleted,
 func appendVisibleTaskTree(
 	parent ticktick.Task,
 	depth int,
-	tasks []ticktick.Task,
+	idx taskChildren,
 	showCompleted bool,
 	showDeleted bool,
 	filter string,
@@ -123,7 +149,7 @@ func appendVisibleTaskTree(
 	placed map[string]bool,
 ) {
 	if depth == 0 {
-		if !subtreeHasVisibleRow(parent, tasks, showCompleted, showDeleted, filter) {
+		if !subtreeHasVisibleRow(parent, idx, showCompleted, showDeleted, filter) {
 			return
 		}
 		if placed[parent.ID] {
@@ -141,8 +167,8 @@ func appendVisibleTaskTree(
 		placed[parent.ID] = true
 		*out = append(*out, taskListRow{Task: parent, Depth: depth})
 	}
-	for _, child := range orderedSubtasks(parent, tasks) {
-		appendVisibleTaskTree(child, depth+1, tasks, showCompleted, showDeleted, filter, out, placed)
+	for _, child := range idx.ordered(parent) {
+		appendVisibleTaskTree(child, depth+1, idx, showCompleted, showDeleted, filter, out, placed)
 	}
 }
 
@@ -158,10 +184,11 @@ func buildVisibleTaskRows(tasks []ticktick.Task, sortMode TaskSortMode, showComp
 	}
 	sortTasksForProject(roots, sortMode)
 
+	idx := indexTaskChildren(tasks)
 	var out []taskListRow
 	placed := make(map[string]bool, len(roots))
 	for _, root := range roots {
-		appendVisibleTaskTree(root, 0, tasks, showCompleted, showDeleted, filter, &out, placed)
+		appendVisibleTaskTree(root, 0, idx, showCompleted, showDeleted, filter, &out, placed)
 	}
 	return out
 }
@@ -169,7 +196,7 @@ func buildVisibleTaskRows(tasks []ticktick.Task, sortMode TaskSortMode, showComp
 func appendTaskTreeForScope(
 	parent ticktick.Task,
 	depth int,
-	tasks []ticktick.Task,
+	idx taskChildren,
 	scope TaskScope,
 	filter string,
 	out *[]taskListRow,
@@ -185,8 +212,8 @@ func appendTaskTreeForScope(
 		*out = append(*out, taskListRow{Task: parent, Depth: depth})
 		childDepth++
 	}
-	for _, child := range orderedSubtasks(parent, tasks) {
-		appendTaskTreeForScope(child, childDepth, tasks, scope, filter, out, placed)
+	for _, child := range idx.ordered(parent) {
+		appendTaskTreeForScope(child, childDepth, idx, scope, filter, out, placed)
 	}
 }
 
@@ -201,10 +228,11 @@ func buildVisibleTaskRowsForScope(tasks []ticktick.Task, sortMode TaskSortMode, 
 		roots = append(roots, task)
 	}
 	sortTasksForProject(roots, sortMode)
+	idx := indexTaskChildren(tasks)
 	var out []taskListRow
 	placed := make(map[string]bool, len(tasks))
 	for _, root := range roots {
-		appendTaskTreeForScope(root, 0, tasks, scope, filter, &out, placed)
+		appendTaskTreeForScope(root, 0, idx, scope, filter, &out, placed)
 	}
 	for _, task := range tasks {
 		if !placed[task.ID] && taskMatchesScope(task, scope) && taskMatchesFilter(task, filter) {

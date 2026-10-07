@@ -38,6 +38,7 @@ func allCommands() []commandHelp {
 		{Name: "focus", Group: "focus & misc", Summary: "Pomodoro summary or live timer", Usage: "ttcli focus [DATE] | start | stop | delete-range | …", Examples: []string{"ttcli focus", "ttcli focus start --duration 5 --title test", `ttcli focus delete-range --task breakfast --from 12:08 --to 13:00 --dry-run`}},
 		{Name: "pomo", Group: "focus & misc", Summary: "Short pomodoro line (tmux)", Usage: "ttcli pomo", Examples: []string{"ttcli pomo"}},
 		{Name: "tui", Group: "focus & misc", Summary: "Interactive browser (tasks, calendar, pomo, habits)", Usage: "ttcli tui", Aliases: []string{"ui"}, Examples: []string{"ttcli tui"}},
+		{Name: "mcp", Group: "focus & misc", Summary: "MCP server for task title and notes", Usage: "ttcli mcp", Examples: []string{"ttcli mcp"}},
 		{Name: "shell", Group: "focus & misc", Summary: "Interactive REPL", Usage: "ttcli shell", Aliases: []string{"repl"}, Examples: []string{"ttcli shell"}},
 		{Name: "help", Group: "focus & misc", Summary: "Help ([cmd] | gum | bt)", Usage: "ttcli help [command|gum|bt]", Examples: []string{"ttcli help tasks", "ttcli help gum", "ttcli help bt"}},
 		{Name: "raw", Group: "focus & misc", Summary: "Debug API GET", Usage: "ttcli raw <api-path>", Examples: []string{"ttcli raw /api/v2/projects"}},

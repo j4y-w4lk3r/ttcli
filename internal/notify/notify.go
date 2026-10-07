@@ -2,6 +2,7 @@
 package notify
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/j4y-w4lk3r/ttcli/internal/pushover"
+	"github.com/j4y-w4lk3r/ttcli/internal/secrets"
 	"github.com/j4y-w4lk3r/ttcli/internal/sessionlog"
 )
 
@@ -78,6 +81,7 @@ func FocusDone(taskTitle string, escalated bool) error {
 		return nil
 	}
 	c := BuildContent(VariantOrange, taskTitle)
+	go notifyPushover(c.Title, c.Body)
 	sessionlog.Appendf("notify_send_attempt", "task=%q via=notify-send+nt-escalate delay=%s", taskTitle, EscalateAfter)
 	if err := saveState(State{
 		Active:    true,
@@ -117,6 +121,22 @@ func FocusDone(taskTitle string, escalated bool) error {
 		TaskTitle:  taskTitle,
 		OverlayPID: pid,
 	})
+}
+
+func notifyPushover(title, body string) {
+	cfg, ok, err := pushover.Load(secrets.Default().ItemsNamed)
+	if err != nil {
+		sessionlog.Appendf("pushover_fail", "err=%v", err)
+		return
+	}
+	if !ok {
+		return
+	}
+	if err := pushover.Send(context.Background(), cfg, title, body); err != nil {
+		sessionlog.Appendf("pushover_fail", "err=%v", err)
+		return
+	}
+	sessionlog.Appendf("pushover_ok", "title=%q", title)
 }
 
 // Dismiss clears the active notification and cancels any pending nt escalate overlay.

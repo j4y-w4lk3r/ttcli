@@ -55,6 +55,9 @@ func daySlotMarker(busy bool, totalW int, sum slotSummary) string {
 	if contentW < 4 {
 		contentW = 4
 	}
+	if !busy {
+		return ""
+	}
 	if busy {
 		if sum.sessions > 0 {
 			capacityMins := sum.capacityMins

@@ -67,6 +67,48 @@ func TestEditTaskNotesFallsBackToDescriptionAndEnterPreservesText(t *testing.T) 
 	}
 }
 
+func TestEnterSavesTheEditFromTheCurrentField(t *testing.T) {
+	m := fixtureModel(120, 40)
+	m.openEditTaskForm(ticktick.Task{ID: "1", Title: "Buy milk"})
+	m.addTaskField = addTaskFieldTitle
+	m.focusAddTaskField()
+	out, cmd := m.updateAddTaskForm(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter should save without walking the remaining fields")
+	}
+	if out.addTaskField != addTaskFieldTitle || out.mode != modeEditTask {
+		t.Fatalf("field=%d mode=%v", out.addTaskField, out.mode)
+	}
+}
+
+func TestTabMovesBetweenTaskFields(t *testing.T) {
+	m := fixtureModel(120, 40)
+	m.openEditTaskForm(ticktick.Task{ID: "1", Title: "Buy milk"})
+	m.addTaskField = addTaskFieldTitle
+	out, _ := m.updateAddTaskForm(tea.KeyMsg{Type: tea.KeyTab})
+	if out.addTaskField != addTaskFieldNotes {
+		t.Fatalf("tab field=%d", out.addTaskField)
+	}
+	out, _ = out.updateAddTaskForm(tea.KeyMsg{Type: tea.KeyShiftTab})
+	if out.addTaskField != addTaskFieldTitle {
+		t.Fatalf("shift+tab field=%d", out.addTaskField)
+	}
+}
+
+func TestCtrlSSavesFromNotes(t *testing.T) {
+	m := fixtureModel(120, 40)
+	m.openEditTaskForm(ticktick.Task{ID: "1", Title: "Buy milk", Content: "note"})
+	m.addTaskField = addTaskFieldNotes
+	m.focusAddTaskField()
+	out, cmd := m.updateAddTaskForm(tea.KeyMsg{Type: tea.KeyCtrlS})
+	if cmd == nil || out.mode != modeEditTask {
+		t.Fatalf("ctrl+s cmd=%v mode=%v", cmd != nil, out.mode)
+	}
+	if !strings.Contains(out.addTaskNotesInput.Value(), "note") {
+		t.Fatalf("notes=%q", out.addTaskNotesInput.Value())
+	}
+}
+
 func TestOpenEditTaskFormPrefillsFocusAndRecurrence(t *testing.T) {
 	m := fixtureModel(120, 40)
 	m.openEditTaskForm(ticktick.Task{
@@ -183,5 +225,31 @@ func TestTaskFormShowsCustomRuleConditionally(t *testing.T) {
 	m.focusAddTaskField()
 	if !strings.Contains(stripANSI(m.View()), "Custom rule") {
 		t.Fatal("custom rule should be visible for custom recurrence")
+	}
+}
+
+func TestEditSubtaskCanBecomeANormalTask(t *testing.T) {
+	m := fixtureModel(120, 40)
+	m.tasks = append(m.tasks, ticktick.Task{ID: "parent", Title: "yu0"})
+	m.openEditTaskForm(ticktick.Task{ID: "child", Title: "fm2", ParentID: "parent"})
+	if !strings.Contains(m.renderAddTaskForm(100, 80), "subtask of yu0") {
+		t.Fatal("edit form should show the parent")
+	}
+	m.addTaskField = addTaskFieldPriority
+	out, _ := m.updateAddTaskForm(tea.KeyMsg{Type: tea.KeyTab})
+	if out.addTaskField != addTaskFieldParent {
+		t.Fatalf("tab field=%d", out.addTaskField)
+	}
+	out, _ = out.updateAddTaskForm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
+	if out.editTaskParentIdx == 0 || !strings.Contains(out.renderAddTaskForm(100, 80), "normal task") {
+		t.Fatal("] should offer to save the subtask as a normal task")
+	}
+}
+
+func TestNormalTaskHidesTheParentField(t *testing.T) {
+	m := fixtureModel(120, 40)
+	m.openEditTaskForm(ticktick.Task{ID: "1", Title: "fm0"})
+	if strings.Contains(m.renderAddTaskForm(100, 80), "Parent") {
+		t.Fatal("a normal task should not show the parent field")
 	}
 }

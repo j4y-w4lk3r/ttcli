@@ -86,8 +86,11 @@ func (t Task) PriorityLabel() string {
 // Trashed reports whether the task is in the trash (soft-deleted in TickTick).
 func (t Task) Trashed() bool { return t.Deleted.Int() != 0 }
 
-// Done reports whether the task is completed.
+// Done reports whether the task is completed or marked won't-do.
 func (t Task) Done() bool { return t.Status.Int() != 0 }
+
+// WontDo reports TickTick's abandoned status (-1).
+func (t Task) WontDo() bool { return t.Status.Int() == -1 }
 
 // Repeating reports whether TickTick attached a recurrence rule to the task.
 func (t Task) Repeating() bool {

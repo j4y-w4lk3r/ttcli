@@ -1,10 +1,6 @@
 package tui
 
-import (
-	"strings"
-
-	"github.com/charmbracelet/lipgloss"
-)
+import "strings"
 
 const (
 	calMonthWeekRows    = 6
@@ -99,19 +95,35 @@ func normalizeCellLines(lines []string, outerH, colW int) []string {
 	return lines
 }
 
+func joinFixedColumns(parts []string, widths []int, total int) string {
+	var b strings.Builder
+	for i, part := range parts {
+		w := 1
+		if i < len(widths) {
+			w = widths[i]
+		}
+		if w < 1 {
+			w = 1
+		}
+		b.WriteString(padToWidth(part, w))
+	}
+	return padToWidth(b.String(), total)
+}
+
 func joinMonthWeekRow(cells [][]string, lay calMonthLayout) []string {
 	if len(cells) == 0 {
 		return nil
 	}
 	outerH := lay.cellOuterH()
 	out := make([]string, outerH)
+	widths := lay.ColW[:]
 	for line := 0; line < outerH; line++ {
 		parts := make([]string, len(cells))
 		for i, cell := range cells {
 			cell = normalizeCellLines(cell, outerH, lay.ColW[i])
 			parts[i] = cell[line]
 		}
-		out[line] = padToWidth(lipgloss.JoinHorizontal(lipgloss.Top, parts...), lay.FullW)
+		out[line] = joinFixedColumns(parts, widths, lay.FullW)
 	}
 	return out
 }

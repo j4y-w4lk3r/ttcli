@@ -91,6 +91,25 @@ func TestHelpBoxNoHardcodedFill(t *testing.T) {
 	}
 }
 
+func TestHelpOverlayUsesWiderBox(t *testing.T) {
+	m := fixtureModel(140, 40)
+	m.showHelp = true
+	out := m.renderHelpOverlay()
+	for _, line := range strings.Split(out, "\n") {
+		plain := stripANSI(line)
+		if !strings.Contains(plain, "╭") {
+			continue
+		}
+		width := lipgloss.Width(strings.TrimSpace(plain))
+		// Width is the content cap; the rounded border adds one column on each side.
+		if width != helpBoxMaxWidth+2 {
+			t.Fatalf("help box width=%d want %d", width, helpBoxMaxWidth+2)
+		}
+		return
+	}
+	t.Fatal("help box border not found")
+}
+
 func TestHelpLongDescTruncates(t *testing.T) {
 	keyColW := helpKeyColWidth()
 	row := helpRow{key: "s / f", desc: "open focus picker (choose task + duration; defaults 25m / 5m)"}

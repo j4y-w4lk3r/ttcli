@@ -605,23 +605,84 @@ func (c *Client) DeleteTask(projectID, taskID string) error {
 }
 
 // TaskSnapshot returns the full private-API task object for archival.
+// Trashed tasks are absent from the project task list; the single-task read
+// still returns them, including deleted:1.
 func (c *Client) TaskSnapshot(projectID, taskID string) (json.RawMessage, error) {
 	pid, err := c.ResolveProject(projectID)
 	if err != nil {
 		return nil, err
 	}
 	task, err := c.findProjectTask(pid, taskID)
-	if err != nil {
+	if err == nil {
+		raw, merr := json.Marshal(task)
+		if merr != nil {
+			return nil, fmt.Errorf("encode task snapshot: %w", merr)
+		}
+		return raw, nil
+	}
+	raw, gerr := c.GetRaw("/api/v2/task/" + url.PathEscape(taskID) + "?projectId=" + url.QueryEscape(pid))
+	if gerr != nil {
 		return nil, err
 	}
-	raw, err := json.Marshal(task)
-	if err != nil {
-		return nil, fmt.Errorf("encode task snapshot: %w", err)
+	var parsed map[string]any
+	if json.Unmarshal(raw, &parsed) != nil {
+		return nil, err
+	}
+	if id, _ := parsed["id"].(string); id != taskID {
+		return nil, err
 	}
 	return raw, nil
 }
 
-// TrashTasks soft-deletes tasks while keeping them recoverable in TickTick.
+// PurgeTrashTasks permanently deletes tasks that are already in Trash.
+// TickTick's web client sends DELETE /api/v2/task?deleteforever=true with
+// [{taskId, projectId}]. The batch delete array only moves a live task into
+// Trash, and DELETE /trash/cleanUp empties the entire Trash.
+func (c *Client) PurgeTrashTasks(projectID string, taskIDs []string) error {
+	if len(taskIDs) == 0 {
+		return nil
+	}
+	pid, err := c.ResolveProject(projectID)
+	if err != nil {
+		return err
+	}
+	items := make([]map[string]string, 0, len(taskIDs))
+	for _, taskID := range taskIDs {
+		items = append(items, map[string]string{"taskId": taskID, "projectId": pid})
+	}
+	b, err := json.Marshal(items)
+	if err != nil {
+		return err
+	}
+	if _, err := c.do(http.MethodDelete, "/api/v2/task?deleteforever=true", b); err != nil {
+		return err
+	}
+	trashed, err := c.AccountTrashTasks()
+	if err != nil {
+		return err
+	}
+	present := make(map[string]struct{}, len(trashed))
+	for _, task := range trashed {
+		if task.ID != "" {
+			present[task.ID] = struct{}{}
+		}
+	}
+	var still []string
+	for _, taskID := range taskIDs {
+		if _, ok := present[taskID]; ok {
+			still = append(still, taskID)
+		}
+	}
+	if len(still) > 0 {
+		return fmt.Errorf("permanent delete did not apply to task %s", strings.Join(still, ", "))
+	}
+	return nil
+}
+
+// TrashTasks moves tasks to Trash.
+// A batch update that sets deleted to 1 returns a new etag and leaves the task
+// live. TickTick moves a task to Trash when the batch lists it under delete.
+// That response's id2etag is empty even when the task does land in Trash.
 func (c *Client) TrashTasks(projectID string, taskIDs []string) error {
 	if len(taskIDs) == 0 {
 		return nil
@@ -630,17 +691,46 @@ func (c *Client) TrashTasks(projectID string, taskIDs []string) error {
 	if err != nil {
 		return err
 	}
-	targets, err := c.findProjectTasks(pid, taskIDs)
+	if err := c.DeleteTasks(pid, taskIDs); err != nil {
+		return err
+	}
+	byID, err := c.projectTaskMap(pid)
 	if err != nil {
 		return err
 	}
-	for _, target := range targets {
-		target["deleted"] = 1
+	var still []string
+	for _, taskID := range taskIDs {
+		task, ok := byID[taskID]
+		if !ok || deletedNum(task["deleted"]) != 0 {
+			continue
+		}
+		still = append(still, taskID)
 	}
-	return c.patchTasks(targets)
+	if len(still) > 0 {
+		return fmt.Errorf("trash did not apply to task %s", strings.Join(still, ", "))
+	}
+	return nil
 }
 
-// RestoreTasks moves trashed tasks back to their previous open/done state.
+func deletedNum(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	default:
+		return 0
+	}
+}
+
+// RestoreTasks puts trashed tasks back in their list.
+// TickTick's web client uses POST /api/v2/trash/restore. A batch update that
+// only sets deleted to 0 can return HTTP 200 and leave the task in Trash.
 func (c *Client) RestoreTasks(projectID string, taskIDs []string) error {
 	if len(taskIDs) == 0 {
 		return nil
@@ -649,14 +739,44 @@ func (c *Client) RestoreTasks(projectID string, taskIDs []string) error {
 	if err != nil {
 		return err
 	}
-	targets, err := c.findProjectTasks(pid, taskIDs)
+	items := make([]map[string]string, 0, len(taskIDs))
+	for _, taskID := range taskIDs {
+		items = append(items, map[string]string{
+			"fromProjectId": pid,
+			"taskId":        taskID,
+			"toProjectId":   pid,
+		})
+	}
+	b, err := json.Marshal(items)
 	if err != nil {
 		return err
 	}
-	for _, target := range targets {
-		target["deleted"] = 0
+	raw, err := c.do(http.MethodPost, "/api/v2/trash/restore", b)
+	if err != nil {
+		return err
 	}
-	return c.patchTasks(targets)
+	var resp struct {
+		ID2Etag  map[string]any `json:"id2etag"`
+		ID2Error map[string]any `json:"id2error"`
+	}
+	if len(strings.TrimSpace(string(raw))) > 0 {
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return fmt.Errorf("decode trash restore: %w", err)
+		}
+	}
+	if len(resp.ID2Error) > 0 {
+		return fmt.Errorf("restore failed: %v", resp.ID2Error)
+	}
+	var missing []string
+	for _, taskID := range taskIDs {
+		if _, ok := resp.ID2Etag[taskID]; !ok {
+			missing = append(missing, taskID)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("restore did not apply to task %s", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 // DeleteTasks permanently removes tasks from one project in one batch.
@@ -781,6 +901,52 @@ func (c *Client) CompleteTasks(projectID string, taskIDs []string) error {
 	return c.patchTasks(targets)
 }
 
+// AbandonTasks marks tasks won't-do (TickTick status -1, Abandoned).
+func (c *Client) AbandonTasks(projectID string, taskIDs []string) error {
+	if len(taskIDs) == 0 {
+		return nil
+	}
+	pid, err := c.ResolveProject(projectID)
+	if err != nil {
+		return err
+	}
+	abandonedAt := time.Now().UTC().Format(ticktickTimeLayout)
+	targets := make([]map[string]any, 0, len(taskIDs))
+	for _, taskID := range taskIDs {
+		target, err := c.findTaskRawByID(taskID, pid)
+		if err != nil {
+			return err
+		}
+		target["status"] = -1
+		target["completedTime"] = abandonedAt
+		targets = append(targets, target)
+	}
+	return c.patchTasks(targets)
+}
+
+// ReopenAbandonedTasks marks won't-do tasks open again. The project task list
+// omits some abandoned tasks, so this looks them up by id.
+func (c *Client) ReopenAbandonedTasks(projectID string, taskIDs []string) error {
+	if len(taskIDs) == 0 {
+		return nil
+	}
+	pid, err := c.ResolveProject(projectID)
+	if err != nil {
+		return err
+	}
+	targets := make([]map[string]any, 0, len(taskIDs))
+	for _, taskID := range taskIDs {
+		target, err := c.findTaskRawByID(taskID, pid)
+		if err != nil {
+			return err
+		}
+		target["status"] = 0
+		target["completedTime"] = ""
+		targets = append(targets, target)
+	}
+	return c.patchTasks(targets)
+}
+
 // ReopenTask marks a completed task as open again.
 func (c *Client) ReopenTask(projectID, taskID string) error {
 	return c.ReopenTasks(projectID, []string{taskID})
@@ -815,6 +981,22 @@ func (c *Client) findProjectTask(projectID, taskID string) (map[string]any, erro
 }
 
 func (c *Client) findProjectTasks(projectID string, taskIDs []string) ([]map[string]any, error) {
+	byID, err := c.projectTaskMap(projectID)
+	if err != nil {
+		return nil, err
+	}
+	targets := make([]map[string]any, 0, len(taskIDs))
+	for _, taskID := range taskIDs {
+		target, ok := byID[taskID]
+		if !ok {
+			return nil, fmt.Errorf("task %s not found in project %s", taskID, projectID)
+		}
+		targets = append(targets, target)
+	}
+	return targets, nil
+}
+
+func (c *Client) projectTaskMap(projectID string) (map[string]map[string]any, error) {
 	raw, err := c.GetRaw("/api/v2/project/" + projectID + "/tasks")
 	if err != nil {
 		return nil, err
@@ -835,15 +1017,7 @@ func (c *Client) findProjectTasks(projectID string, taskIDs []string) ([]map[str
 			byID[id] = task
 		}
 	}
-	targets := make([]map[string]any, 0, len(taskIDs))
-	for _, taskID := range taskIDs {
-		target, ok := byID[taskID]
-		if !ok {
-			return nil, fmt.Errorf("task %s not found in project %s", taskID, projectID)
-		}
-		targets = append(targets, target)
-	}
-	return targets, nil
+	return byID, nil
 }
 
 func (c *Client) patchTask(projectID string, target map[string]any) error {

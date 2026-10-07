@@ -44,22 +44,26 @@ type HabitsSnapshot struct {
 }
 
 type dataSnapshot struct {
-	Version       int                               `json:"version"`
-	Tree          cacheEntry[TreeSnapshot]          `json:"tree"`
-	ProjectTasks  map[string]cacheEntry[[]Task]     `json:"projectTasks,omitempty"`
-	OpenTasks     cacheEntry[[]Task]                `json:"openTasks"`
-	CompletedDays map[string]cacheEntry[[]Task]     `json:"completedDays,omitempty"`
-	FocusDays     map[string]cacheEntry[FocusStats] `json:"focusDays,omitempty"`
-	FocusHistory  cacheEntry[[]FocusRecord]         `json:"focusHistory"`
-	Habits        cacheEntry[HabitsSnapshot]        `json:"habits"`
+	Version            int                               `json:"version"`
+	Tree               cacheEntry[TreeSnapshot]          `json:"tree"`
+	ProjectTasks       map[string]cacheEntry[[]Task]     `json:"projectTasks,omitempty"`
+	OpenTasks          cacheEntry[[]Task]                `json:"openTasks"`
+	CompletedByProject map[string]cacheEntry[[]Task]     `json:"completedByProject,omitempty"`
+	SmartTasks         map[string]cacheEntry[[]Task]     `json:"smartTasks,omitempty"`
+	CompletedDays      map[string]cacheEntry[[]Task]     `json:"completedDays,omitempty"`
+	FocusDays          map[string]cacheEntry[FocusStats] `json:"focusDays,omitempty"`
+	FocusHistory       cacheEntry[[]FocusRecord]         `json:"focusHistory"`
+	Habits             cacheEntry[HabitsSnapshot]        `json:"habits"`
 }
 
 func newDataSnapshot() dataSnapshot {
 	return dataSnapshot{
-		Version:       snapshotVersion,
-		ProjectTasks:  map[string]cacheEntry[[]Task]{},
-		CompletedDays: map[string]cacheEntry[[]Task]{},
-		FocusDays:     map[string]cacheEntry[FocusStats]{},
+		Version:            snapshotVersion,
+		ProjectTasks:       map[string]cacheEntry[[]Task]{},
+		CompletedByProject: map[string]cacheEntry[[]Task]{},
+		SmartTasks:         map[string]cacheEntry[[]Task]{},
+		CompletedDays:      map[string]cacheEntry[[]Task]{},
+		FocusDays:          map[string]cacheEntry[FocusStats]{},
 	}
 }
 
@@ -88,6 +92,12 @@ func loadDataSnapshot(path string) dataSnapshot {
 	}
 	if snap.ProjectTasks == nil {
 		snap.ProjectTasks = map[string]cacheEntry[[]Task]{}
+	}
+	if snap.CompletedByProject == nil {
+		snap.CompletedByProject = map[string]cacheEntry[[]Task]{}
+	}
+	if snap.SmartTasks == nil {
+		snap.SmartTasks = map[string]cacheEntry[[]Task]{}
 	}
 	if snap.CompletedDays == nil {
 		snap.CompletedDays = map[string]cacheEntry[[]Task]{}

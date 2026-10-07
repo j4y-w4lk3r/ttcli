@@ -74,11 +74,7 @@ func taskFocusPlan(t ticktick.Task, config planning.Config) (minutes, pomos int,
 	return estimate.Minutes, estimate.Pomos, estimate.Source == planning.EstimateDefault
 }
 
-func renderTaskFocusProgressInlineWithConfig(
-	t ticktick.Task,
-	s ticktick.TaskFocusSummary,
-	config planning.Config,
-) string {
+func focusProgressLabel(t ticktick.Task, s ticktick.TaskFocusSummary, config planning.Config) string {
 	planned, plannedPomos, inferred := taskFocusPlan(t, config)
 	invested := int((s.TotalSeconds + 30) / 60)
 	remaining := max(planned-invested, 0)
@@ -87,12 +83,19 @@ func renderTaskFocusProgressInlineWithConfig(
 	if inferred {
 		approx = "~"
 	}
-	label := fmt.Sprintf(
+	return fmt.Sprintf(
 		"%s %d/%d · %s%s left",
 		iconPomodoro, completedPomos, plannedPomos,
 		approx, planning.FormatMinutes(remaining),
 	)
-	return taskFocusInlineStyle.Render(label)
+}
+
+func renderTaskFocusProgressInlineWithConfig(
+	t ticktick.Task,
+	s ticktick.TaskFocusSummary,
+	config planning.Config,
+) string {
+	return taskFocusInlineStyle.Render(focusProgressLabel(t, s, config))
 }
 
 func renderTaskFocusProgressInline(t ticktick.Task, s ticktick.TaskFocusSummary) string {
@@ -106,18 +109,18 @@ func (m model) taskFocusDisplay(t ticktick.Task) (ticktick.TaskFocusSummary, boo
 }
 
 func maxTaskFocusInlineW(m model, rows []taskListRow) int {
-	max := 0
+	config := m.uiSettings.planningConfig()
+	maxW := 0
 	for _, r := range rows {
-		if s, ok := m.taskFocusDisplay(r.Task); ok {
-			w := lipgloss.Width(renderTaskFocusProgressInlineWithConfig(
-				r.Task, s, m.uiSettings.planningConfig(),
-			))
-			if w > max {
-				max = w
-			}
+		summary, ok := m.taskFocusDisplay(r.Task)
+		if !ok {
+			continue
+		}
+		if w := lipgloss.Width(focusProgressLabel(r.Task, summary, config)); w > maxW {
+			maxW = w
 		}
 	}
-	return max
+	return maxW
 }
 
 func renderTaskFocusDetail(s ticktick.TaskFocusSummary) string {

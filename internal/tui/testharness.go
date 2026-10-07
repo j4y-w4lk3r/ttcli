@@ -57,11 +57,12 @@ func analyzeView(view string, termW, termH int, viewName string) viewFrameReport
 		r.HeightError = fmt.Sprintf("got %d lines, want %d", len(r.Lines), termH)
 	}
 
+	wantW := viewDrawWidth(termW)
 	for i, line := range r.Lines {
 		w := lipgloss.Width(line)
-		if w != termW {
+		if w != wantW {
 			r.WidthErrors = append(r.WidthErrors,
-				fmt.Sprintf("line %d: lipgloss.Width=%d want %d preview=%q", i, w, termW, previewLine(line, 60)))
+				fmt.Sprintf("line %d: lipgloss.Width=%d want %d preview=%q", i, w, wantW, previewLine(line, 60)))
 		}
 		if strings.Contains(line, "\n") {
 			r.WidthErrors = append(r.WidthErrors, fmt.Sprintf("line %d: contains embedded newline", i))
@@ -180,6 +181,12 @@ func fixtureModel(termW, termH int) model {
 	m.tree = tree
 	m.listRows = listRows
 	m.listCursor = 0
+	for i, row := range listRows {
+		if row.node.ID == "p0" {
+			m.listCursor = i
+			break
+		}
+	}
 	m.projectID = "p0"
 	m.projectName = "List0"
 	m.tasks = tasks

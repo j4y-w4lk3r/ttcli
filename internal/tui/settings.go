@@ -239,6 +239,7 @@ type uiSettings struct {
 	PomoDailyGoal          int                     `json:"pomoDailyGoal,omitempty"`
 	TaskDetailLayout       TaskDetailLayout        `json:"taskDetailLayout,omitempty"`
 	LastView               string                  `json:"lastView,omitempty"`
+	LastListID             string                  `json:"lastListId,omitempty"`
 	WorkStart              string                  `json:"workStart,omitempty"`
 	WorkEnd                string                  `json:"workEnd,omitempty"`
 	PlanningBufferMinutes  int                     `json:"planningBufferMinutes,omitempty"`

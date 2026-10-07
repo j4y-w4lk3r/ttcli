@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/j4y-w4lk3r/ttcli/internal/ticktick"
 )
@@ -73,5 +74,44 @@ func TestListSwitchWhileScrollingFrameIntegrity(t *testing.T) {
 				assertViewOK(t, m, fmt.Sprintf("list loaded %d", i))
 			}
 		})
+	}
+}
+
+func TestLargeTrashListScrollReusesTheBuiltRows(t *testing.T) {
+	const n = 3000
+	tasks := make([]ticktick.Task, n)
+	for i := range tasks {
+		tasks[i] = ticktick.Task{ID: fmt.Sprintf("bin-%d", i), Title: "trashed item", Deleted: 1}
+	}
+	start := time.Now()
+	rows := buildVisibleTaskRowsForScope(tasks, TaskSortCustom, TaskScopeAll, "")
+	if elapsed := time.Since(start); elapsed > 150*time.Millisecond {
+		t.Fatalf("building %d trash rows took %s", n, elapsed)
+	}
+	if len(rows) != n {
+		t.Fatalf("rows=%d", len(rows))
+	}
+
+	m := fixtureModel(100, 30)
+	m.projectID = smartTrashID
+	m.projectName = "Trash"
+	m.paneFocus = paneTasks
+	m.tasks = tasks
+	if got := m.visibleTaskCount(); got != n {
+		t.Fatalf("visible=%d", got)
+	}
+	start = time.Now()
+	for i := 0; i < 40; i++ {
+		m = pressKey(m, "j")
+		if m.visibleTaskCount() != n {
+			t.Fatalf("scroll %d lost rows", i)
+		}
+		_ = m.View()
+	}
+	if elapsed := time.Since(start); elapsed > 400*time.Millisecond {
+		t.Fatalf("40 trash scrolls took %s", elapsed)
+	}
+	if m.taskCursor != 40 {
+		t.Fatalf("cursor=%d", m.taskCursor)
 	}
 }

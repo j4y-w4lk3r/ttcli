@@ -71,6 +71,7 @@ type TaskUpdateInput struct {
 	Recurrence      *TaskRecurrence
 	ClearRecurrence bool
 	FocusPlan       *TaskFocusPlan
+	ClearParent     bool
 }
 
 // UpdateTask updates task fields and due date / reminder / duration.
@@ -82,6 +83,7 @@ func (c *Client) UpdateTask(taskID, projectRef string, in TaskUpdateInput) error
 	task["title"] = in.Title
 	task["content"] = in.Content
 	task["priority"] = in.Priority
+	clearParent := in.ClearParent
 	if in.ClearDue {
 		clearScheduleOnMap(task)
 	} else if in.Schedule != nil && in.Schedule.HasDue {
@@ -95,7 +97,53 @@ func (c *Client) UpdateTask(taskID, projectRef string, in TaskUpdateInput) error
 	if err := applyFocusPlanToMap(task, in.FocusPlan); err != nil {
 		return err
 	}
-	return c.patchTaskMap(task)
+	if err := c.patchTaskMap(task); err != nil {
+		return err
+	}
+	if clearParent {
+		return c.clearTaskParent(task)
+	}
+	return nil
+}
+
+// clearTaskParent removes a subtask link. TickTick ignores parentId on a
+// normal task update; the web client uses POST /api/v2/batch/taskParent.
+func (c *Client) clearTaskParent(task map[string]any) error {
+	taskID, _ := task["id"].(string)
+	projectID, _ := task["projectId"].(string)
+	parentID, _ := task["parentId"].(string)
+	if taskID == "" || parentID == "" {
+		return nil
+	}
+	if projectID == "" {
+		return fmt.Errorf("task has no list")
+	}
+	body, err := json.Marshal([]map[string]string{{
+		"taskId":      taskID,
+		"projectId":   projectID,
+		"oldParentId": parentID,
+	}})
+	if err != nil {
+		return err
+	}
+	raw, err := c.do(http.MethodPost, "/api/v2/batch/taskParent", body)
+	if err != nil {
+		return err
+	}
+	var resp struct {
+		ID2Error map[string]any `json:"id2error"`
+	}
+	if len(strings.TrimSpace(string(raw))) > 0 && json.Unmarshal(raw, &resp) == nil && len(resp.ID2Error) > 0 {
+		return fmt.Errorf("could not make the task a normal task: %v", resp.ID2Error)
+	}
+	updated, err := c.findTaskRawByID(taskID, projectID)
+	if err != nil {
+		return err
+	}
+	if pid, _ := updated["parentId"].(string); pid != "" {
+		return fmt.Errorf("task is still a subtask")
+	}
+	return nil
 }
 
 // ApplyTaskSchedule sets start/due, reminder, and duration on a raw task map.

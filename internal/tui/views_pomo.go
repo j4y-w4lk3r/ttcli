@@ -211,8 +211,8 @@ func sectionHeader(title string, width int) string {
 
 func renderCompletedTaskLine(t ticktick.Task, width int) string {
 	clock := pomoTimeStyle.Render(completedTaskClock(t))
-	check := taskDoneStyle.Render(iconCheck)
-	title := taskDoneStyle.Render(t.Title)
+	check := taskCompletedStyle.Render(iconCheck)
+	title := taskCompletedStyle.Render(t.Title)
 	return truncateInner(clock+" "+check+" "+title, width)
 }
 

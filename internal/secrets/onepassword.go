@@ -27,6 +27,79 @@ func (OnePassword) CheckSignedIn() error {
 	return nil
 }
 
+func (OnePassword) ItemsNamed(vault, title string) ([]Item, error) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return nil, fmt.Errorf("1Password item name is empty")
+	}
+	args := []string{"item", "list", "--format", "json"}
+	if strings.TrimSpace(vault) != "" {
+		args = append(args, "--vault", vault)
+	}
+	out, err := runOp(args...)
+	if err != nil {
+		return nil, fmt.Errorf("op item list: %w", err)
+	}
+	var listed []struct {
+		ID       string `json:"id"`
+		Title    string `json:"title"`
+		Category string `json:"category"`
+		Vault    struct {
+			Name string `json:"name"`
+		} `json:"vault"`
+	}
+	if err := json.Unmarshal([]byte(out), &listed); err != nil {
+		return nil, fmt.Errorf("op item list: parse JSON: %w", err)
+	}
+	want := strings.ToLower(title)
+	var matches []Item
+	for _, it := range listed {
+		if strings.ToLower(strings.TrimSpace(it.Title)) != want || it.ID == "" {
+			continue
+		}
+		raw, err := runOp("item", "get", it.ID, "--format", "json")
+		if err != nil {
+			return nil, fmt.Errorf("read 1Password item %q: %w", it.Title, err)
+		}
+		fields, err := parseItemFields(raw)
+		if err != nil {
+			return nil, err
+		}
+		vaultName := it.Vault.Name
+		matches = append(matches, Item{
+			Title:    it.Title,
+			Category: it.Category,
+			Vault:    vaultName,
+			Fields:   fields,
+		})
+	}
+	if len(matches) == 0 {
+		if vault != "" {
+			return nil, fmt.Errorf("no 1Password item matching %q in vault %q", title, vault)
+		}
+		return nil, fmt.Errorf("no 1Password item matching %q", title)
+	}
+	return matches, nil
+}
+
+func parseItemFields(out string) ([]Field, error) {
+	var item struct {
+		Fields []struct {
+			Purpose string `json:"purpose"`
+			Label   string `json:"label"`
+			Value   string `json:"value"`
+		} `json:"fields"`
+	}
+	if err := json.Unmarshal([]byte(out), &item); err != nil {
+		return nil, fmt.Errorf("parse op item JSON: %w", err)
+	}
+	fields := make([]Field, 0, len(item.Fields))
+	for _, f := range item.Fields {
+		fields = append(fields, Field{Label: f.Label, Purpose: f.Purpose, Value: f.Value})
+	}
+	return fields, nil
+}
+
 func (OnePassword) GetLogin(vault, itemRef string) (string, string, error) {
 	if itemRef == "" {
 		itemRef = "TickTick"

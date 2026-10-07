@@ -38,7 +38,9 @@ var helpRows = []helpRow{
 
 	helpSection("Tasks view — lists pane"),
 	{"h / Shift+Tab", "focus lists pane", false},
-	{"j / k", "move list selection", false},
+	{"j / k", "move list or folder selection", false},
+	{"/", "search lists · Enter opens the match and focuses tasks", false},
+	{"", "Up/Down move between matches · Esc closes the search", false},
 	{"PgUp / PgDn", "scroll lists one page", false},
 	{"Ctrl+U / Ctrl+D", "scroll lists one page (alternative)", false},
 	{"g / G", "first / last list", false},
@@ -47,6 +49,8 @@ var helpRows = []helpRow{
 	{"m", "move selected list to folder", false},
 	{"e", "rename list or folder", false},
 	{"x / Backspace", "delete list or folder", false},
+	{"u", "undo the last deleted list or folder", false},
+	{"", "Completed, Won't Do, and Trash stay pinned under the lists", false},
 
 	helpSection("Tasks view — tasks pane"),
 	{"l / Tab", "focus tasks pane", false},
@@ -55,6 +59,7 @@ var helpRows = []helpRow{
 	{"Ctrl+U / Ctrl+D", "scroll tasks one page (alternative)", false},
 	{"g / G", "first / last task", false},
 	{"Enter / d", "complete/reopen · restore from Trash · recreate from Archive", false},
+	{"w", "move the selected task to Won't Do · press again there to reopen", false},
 	{"x", "check in selected task today (native for recurring · local otherwise)", false},
 	{"c / C", "next / previous scope: Open · Done · Trash · All · Archive", false},
 	{"n", "new task with schedule · focus budget · recurrence · reminder · priority", false},
@@ -64,8 +69,12 @@ var helpRows = []helpRow{
 	{"u", "clear marked tasks", false},
 	{"m", "move marked tasks or cursor task to another list (incl. done when shown)", false},
 	{"e", "edit task schedule · focus budget · recurrence · details", false},
+	{"i", "ask AI to rewrite the selected task title and notes", false},
+	{"y", "copy the selected task title", false},
 	{"Backspace", "move to Trash · in Trash confirm permanent deletion", false},
-	{"/", "search title, notes, and tags inside the current scope", false},
+	{"/", "search title, notes, and tags as you type", false},
+	{"", "All searches every list · a folder searches the lists inside it", false},
+	{"Esc", "clear the current task search", false},
 	{"o", "cycle task sort (custom · due · priority · title)", false},
 	{"z", "toggle task detail layout (bottom panel · side panel)", false},
 	{"", "task rows show completed/planned pomos and remaining time; ~ means estimated", false},
@@ -73,7 +82,8 @@ var helpRows = []helpRow{
 	helpSection("New task form"),
 	{"Tab / Shift+Tab", "next / previous field", false},
 	{"[ / ]", "cycle repeat · repeat basis · reminder · priority options", false},
-	{"Enter", "next field · save on last field · newline in notes", false},
+	{"Enter", "save the task from the current field", false},
+	{"Ctrl+S", "save while the cursor is in notes", false},
 	{"Esc", "cancel", false},
 	{"Due date", "DD/MM/YYYY with auto slashes · empty = no date", false},
 	{"Start time", "HH:MM; Duration sets the calendar block end", false},
@@ -83,10 +93,12 @@ var helpRows = []helpRow{
 	helpSection("Edit task form"),
 	{"e", "open edit form on selected task", false},
 	{"Tab / Shift+Tab", "next / previous field", false},
-	{"[ / ]", "cycle repeat · repeat basis · reminder · priority options", false},
-	{"Enter", "next field · save on last field · newline in notes", false},
+	{"[ / ]", "cycle repeat · repeat basis · reminder · priority · parent options", false},
+	{"Enter", "save the task from the current field", false},
+	{"Ctrl+S", "save while the cursor is in notes", false},
 	{"Esc", "cancel", false},
 	{"Clear due", "empty due date removes schedule", false},
+	{"Parent", "on a subtask, choose normal task so it sorts on its own", false},
 
 	helpSection("New list prompt"),
 	{"Ctrl+F", "change target folder", false},
@@ -103,7 +115,7 @@ var helpRows = []helpRow{
 	{"h / l / j / k", "move day selection · select tasks in Day/Week", false},
 	{"PgUp / PgDn", "scroll the expanded Week timeline", false},
 	{"z", "toggle Week density (compact · stretch)", false},
-	{"", "Calendar is Monday-first; Month cells show completed/daily-goal pomos", false},
+	{"", "Month cells show completed/goal pomos and claimed minutes (unclaimed overtime excluded)", false},
 
 	helpSection("Pomodoro view"),
 	{"v", "cycle focus design (segmented arc · focus bar · status card)", false},
@@ -173,10 +185,12 @@ func helpKeyColWidth() int {
 	return helpMarkerW + max + 2 // gap before description
 }
 
+const helpBoxMaxWidth = 96
+
 func (m model) renderHelpOverlay() string {
 	boxW := m.width - 4
-	if boxW > 72 {
-		boxW = 72
+	if boxW > helpBoxMaxWidth {
+		boxW = helpBoxMaxWidth
 	}
 	if boxW < 40 {
 		boxW = m.width - 2

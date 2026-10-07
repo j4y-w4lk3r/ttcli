@@ -25,14 +25,76 @@ func (c *Client) CompletedTasks() ([]Task, error) {
 	return tasks, nil
 }
 
+const (
+	completedPageLimit = 500
+	completedMaxPages  = 40
+)
+
 // CompletedTasksInRange asks TickTick to limit closed tasks to a time range.
 // The local filter in TasksCompletedOn remains authoritative if the private
 // endpoint returns a wider window.
 func (c *Client) CompletedTasksInRange(start, end time.Time) ([]Task, error) {
+	return c.fetchClosedTasks(start, end, completedPageLimit)
+}
+
+// AllCompletedTasks returns completed tasks account-wide.
+// A project task feed only embeds a few finished tasks, so list views merge
+// this history to show every completion in that list.
+func (c *Client) AllCompletedTasks() ([]Task, error) {
+	start := time.Date(2010, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Now().Add(48 * time.Hour)
+	return c.completedTasksPaged(start, end, completedPageLimit)
+}
+
+func (c *Client) completedTasksPaged(start, end time.Time, limit int) ([]Task, error) {
+	if limit < 1 {
+		limit = completedPageLimit
+	}
+	var all []Task
+	seen := map[string]struct{}{}
+	cursor := end
+	for page := 0; page < completedMaxPages; page++ {
+		if !cursor.After(start) {
+			break
+		}
+		batch, err := c.fetchClosedTasks(start, cursor, limit)
+		if err != nil {
+			if page == 0 {
+				return nil, err
+			}
+			break
+		}
+		added := 0
+		for _, task := range batch {
+			if task.ID != "" {
+				if _, ok := seen[task.ID]; ok {
+					continue
+				}
+				seen[task.ID] = struct{}{}
+			}
+			all = append(all, task)
+			added++
+		}
+		if len(batch) < limit || added == 0 {
+			break
+		}
+		oldest, ok := oldestCompletedTime(batch)
+		if !ok || !oldest.Before(cursor) {
+			break
+		}
+		cursor = oldest.Add(-time.Millisecond)
+	}
+	return all, nil
+}
+
+func (c *Client) fetchClosedTasks(start, end time.Time, limit int) ([]Task, error) {
+	if limit < 1 {
+		limit = completedPageLimit
+	}
 	values := url.Values{}
 	values.Set("from", start.UTC().Format(ticktickTimeLayout))
 	values.Set("to", end.UTC().Format(ticktickTimeLayout))
-	values.Set("limit", strconv.Itoa(500))
+	values.Set("limit", strconv.Itoa(limit))
 	// TickTick now requires the closed-task status discriminator. Omitting it
 	// produces an opaque HTTP 500 from the private endpoint.
 	values.Set("status", "Completed")
@@ -41,6 +103,154 @@ func (c *Client) CompletedTasksInRange(start, end time.Time) ([]Task, error) {
 		return nil, err
 	}
 	return tasks, nil
+}
+
+const (
+	projectCompletedPageLimit = 100
+	completedQueryLayout      = "2006-01-02 15:04:05"
+)
+
+// ProjectCompletedTasks returns every completed task in one list.
+// The project task feed only embeds a few of them.
+func (c *Client) ProjectCompletedTasks(projectID string) ([]Task, error) {
+	return c.projectCompletedPaged(projectID, projectCompletedPageLimit)
+}
+
+// AccountCompletedTasks returns completed tasks across every list.
+func (c *Client) AccountCompletedTasks() ([]Task, error) {
+	return c.completedFeedPaged("/api/v2/project/all/completed/", "", projectCompletedPageLimit)
+}
+
+// AccountAbandonedTasks returns won't-do tasks (TickTick status -1).
+func (c *Client) AccountAbandonedTasks() ([]Task, error) {
+	return c.completedFeedPaged("/api/v2/project/all/closed", "Abandoned", projectCompletedPageLimit)
+}
+
+// AccountTrashTasks returns trashed tasks, paging TickTick's trash feed.
+func (c *Client) AccountTrashTasks() ([]Task, error) {
+	const limit = 100
+	start := 0
+	var all []Task
+	seen := map[string]struct{}{}
+	for page := 0; page < completedMaxPages; page++ {
+		values := url.Values{}
+		values.Set("start", strconv.Itoa(start))
+		values.Set("limit", strconv.Itoa(limit))
+		var parsed struct {
+			Tasks     []Task `json:"tasks"`
+			NextStart int    `json:"nextStart"`
+		}
+		if err := c.getJSON("/api/v2/project/all/trash/pagination?"+values.Encode(), &parsed); err != nil {
+			if page == 0 {
+				return nil, err
+			}
+			break
+		}
+		added := 0
+		for _, task := range parsed.Tasks {
+			if task.ID != "" {
+				if _, ok := seen[task.ID]; ok {
+					continue
+				}
+				seen[task.ID] = struct{}{}
+			}
+			all = append(all, task)
+			added++
+		}
+		if added == 0 || parsed.NextStart < 0 || parsed.NextStart <= start {
+			break
+		}
+		start = parsed.NextStart
+	}
+	return all, nil
+}
+
+func (c *Client) projectCompletedPaged(projectID string, limit int) ([]Task, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil, fmt.Errorf("project id required")
+	}
+	if limit < 1 {
+		limit = projectCompletedPageLimit
+	}
+	path := "/api/v2/project/" + url.PathEscape(projectID) + "/completed/"
+	return c.completedFeedPaged(path, "", limit)
+}
+
+func (c *Client) completedFeedPaged(path, status string, limit int) ([]Task, error) {
+	if limit < 1 {
+		limit = projectCompletedPageLimit
+	}
+	to := time.Now().UTC().Add(time.Minute)
+	var all []Task
+	seen := map[string]struct{}{}
+	for page := 0; page < completedMaxPages; page++ {
+		batch, err := c.fetchCompletedFeed(path, status, to, limit)
+		if err != nil {
+			if page == 0 {
+				return nil, err
+			}
+			break
+		}
+		added := 0
+		for _, task := range batch {
+			if task.ID != "" {
+				if _, ok := seen[task.ID]; ok {
+					continue
+				}
+				seen[task.ID] = struct{}{}
+			}
+			all = append(all, task)
+			added++
+		}
+		if len(batch) < limit || added == 0 {
+			break
+		}
+		oldest, ok := oldestCompletedTime(batch)
+		if !ok {
+			break
+		}
+		next := oldest.UTC()
+		if !next.Before(to) {
+			next = to.Add(-time.Second)
+		}
+		to = next
+	}
+	return all, nil
+}
+
+func (c *Client) fetchCompletedFeed(path, status string, to time.Time, limit int) ([]Task, error) {
+	values := url.Values{}
+	values.Set("from", "")
+	values.Set("to", to.UTC().Format(completedQueryLayout))
+	values.Set("limit", strconv.Itoa(limit))
+	if status != "" {
+		values.Set("status", status)
+	}
+	var tasks []Task
+	if err := c.getJSON(path+"?"+values.Encode(), &tasks); err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
+func oldestCompletedTime(tasks []Task) (time.Time, bool) {
+	var oldest time.Time
+	found := false
+	for _, task := range tasks {
+		if task.CompletedT == "" {
+			continue
+		}
+		completedAt, err := ParseAPITime(task.CompletedT)
+		if err != nil {
+			continue
+		}
+		if !found || completedAt.Before(oldest) {
+			oldest = completedAt
+			found = true
+		}
+	}
+	return oldest, found
 }
 
 // TasksCompletedBetween returns tasks whose completion timestamp falls within

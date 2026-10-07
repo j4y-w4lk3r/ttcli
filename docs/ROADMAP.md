@@ -5,10 +5,25 @@
 | Phase | Status | Features |
 |-------|--------|----------|
 | **1** | done | List tree · task pane · views 1–4 · `?` help overlay |
-| **2** | done | Pomodoro timer · calendar · habits · nerd font icons · responsive layout |
-| **3** | planned | Habit check-in · mouse · Open API OAuth option |
+| **2** | done | Pomodoro timer · calendar · habits · habit check-in · nerd font icons · responsive layout |
+| **3** | done | Pinned Completed, Won't Do, and Trash · list search · closed-list colors |
+| **4** | done | Undo a deleted list · a project's Done view excludes Won't Do |
+| **5** | done | `i` rewrites a task title and notes after a preview · Pushover on focus done · MCP tools |
+| **later** | planned | Mouse · Open API OAuth · KOReader · Pushover for task reminders |
 
 Run: `ttcli tui`
+
+## MCP and Pushover
+
+### MCP server
+
+`ttcli mcp` speaks the Model Context Protocol on stdio. Tools: `search_tasks`, `get_task`, and `update_task_text`. In the TUI, `i` on a task asks for one instruction, shows the new title and notes, and saves on Enter. The model endpoint is `TTCLI_AI_API_KEY` and `TTCLI_AI_MODEL`, or a 1Password login named by `TTCLI_AI_OP_ITEM`.
+
+Pushover is sent with the focus-finished desktop alert when `TTCLI_PUSHOVER_USER` and `TTCLI_PUSHOVER_TOKEN` are set, or when `TTCLI_PUSHOVER_OP_ITEM` names a 1Password item. A software-license field "license key" is the user key, and a field named "API token" is the application token. The pushover.net website login is not used.
+
+### Pushover
+
+The focus-finished alert also goes to Pushover when credentials are set. Task reminders can use the same sender later.
 
 ## API strategy: private web API vs official Open API
 

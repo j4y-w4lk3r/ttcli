@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -151,6 +152,91 @@ func TestRepositoryFiltersCrossProjectTaskLeaks(t *testing.T) {
 	}
 	if len(tasks) != 2 || tasks[0].ID != "wanted" || tasks[1].ID != "legacy-empty-project" {
 		t.Fatalf("project tasks=%+v", tasks)
+	}
+}
+
+func TestProjectTasksMergesCompletedHistoryPastTheEmbeddedSample(t *testing.T) {
+	const projectID = "prio"
+	completedAt := "2026-09-24T16:00:00.000+0000"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/completed/"):
+			_ = json.NewEncoder(w).Encode([]Task{
+				{ID: "embedded", ProjectID: projectID, Title: "already listed", Status: 2, CompletedT: completedAt},
+				{ID: "just-1", ProjectID: projectID, Title: "just finished", Status: 2, CompletedT: completedAt},
+				{ID: "just-2", ProjectID: projectID, Title: "just finished too", Status: 2, CompletedT: completedAt},
+				{ID: "open", ProjectID: projectID, Title: "still open", Status: 2, CompletedT: completedAt},
+				{ID: "other-list", ProjectID: "elsewhere", Title: "elsewhere", Status: 2, CompletedT: completedAt},
+				{ID: "unmarked", ProjectID: projectID, Title: "closed without status", CompletedT: completedAt},
+			})
+		default:
+			_ = json.NewEncoder(w).Encode([]Task{
+				{ID: "open", ProjectID: projectID, Title: "still open", Status: 0},
+				{ID: "embedded", ProjectID: projectID, Title: "already listed", Status: 2, CompletedT: completedAt},
+			})
+		}
+	}))
+	defer server.Close()
+
+	repo := newRepository(repositoryTestClient(server), filepath.Join(t.TempDir(), "data.json"))
+	tasks, _, err := repo.ProjectTasks(projectID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]Task{}
+	for _, task := range tasks {
+		byID[task.ID] = task
+	}
+	if len(tasks) != 5 {
+		t.Fatalf("tasks=%+v", tasks)
+	}
+	if _, ok := byID["other-list"]; ok {
+		t.Fatal("completed task from another list leaked in")
+	}
+	if byID["open"].Status.Int() != 0 {
+		t.Fatalf("open task was overwritten by completed history: %+v", byID["open"])
+	}
+	for _, id := range []string{"just-1", "just-2", "unmarked"} {
+		task, ok := byID[id]
+		if !ok || !task.Done() {
+			t.Fatalf("missing completed task %s in %+v", id, tasks)
+		}
+	}
+}
+
+func TestSmartCompletedOmitsWontDo(t *testing.T) {
+	completedAt := time.Now().UTC().Format(ticktickTimeLayout)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/all/completed/"):
+			_ = json.NewEncoder(w).Encode([]Task{
+				{ID: "done", Title: "finished", Status: 2, CompletedT: completedAt},
+				{ID: "skip", Title: "abandoned", Status: -1, CompletedT: completedAt},
+			})
+		default:
+			if r.URL.Query().Get("status") != "Abandoned" {
+				t.Errorf("status=%q", r.URL.Query().Get("status"))
+			}
+			_ = json.NewEncoder(w).Encode([]Task{
+				{ID: "skip", Title: "abandoned", Status: -1, CompletedT: completedAt},
+			})
+		}
+	}))
+	defer server.Close()
+	repo := newRepository(repositoryTestClient(server), filepath.Join(t.TempDir(), "data.json"))
+	completed, _, err := repo.SmartTasks("completed", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completed) != 1 || completed[0].ID != "done" {
+		t.Fatalf("completed=%+v", completed)
+	}
+	abandoned, _, err := repo.SmartTasks("abandoned", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(abandoned) != 1 || abandoned[0].ID != "skip" {
+		t.Fatalf("abandoned=%+v", abandoned)
 	}
 }
 

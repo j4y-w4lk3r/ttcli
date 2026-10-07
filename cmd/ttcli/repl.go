@@ -86,6 +86,8 @@ func runCommand(args []string) error {
 		return cmdPomo(args[1:])
 	case "tui", "ui":
 		return cmdTui(args[1:])
+	case "mcp":
+		return cmdMCP(args[1:])
 	case "shell", "repl":
 		if isNestedShell() {
 			fmt.Println("(already in shell)")

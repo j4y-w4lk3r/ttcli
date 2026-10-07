@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/j4y-w4lk3r/ttcli/internal/taskarchive"
@@ -80,6 +81,9 @@ func (m model) archiveRecordForTaskID(taskID string) (taskarchive.Record, bool) 
 
 func (m model) taskScopeStats() (total, matching, shown int) {
 	scope := m.effectiveTaskScope()
+	if isSmartList(m.projectID) || m.showsTaskListName() {
+		scope = TaskScopeAll
+	}
 	if scope == TaskScopeArchive {
 		for _, record := range m.archiveRecords {
 			if m.projectID != "" && record.Task.ProjectID != m.projectID {
@@ -101,9 +105,7 @@ func (m model) taskScopeStats() (total, matching, shown int) {
 			matching++
 		}
 	}
-	return total, matching, len(buildVisibleTaskRowsForScope(
-		m.tasks, m.taskSortMode, scope, m.filterInput.Value(),
-	))
+	return total, matching, m.visibleTaskCount()
 }
 
 func groupTasksByProject(tasks []ticktick.Task, fallbackProjectID string) map[string][]string {
@@ -116,4 +118,22 @@ func groupTasksByProject(tasks []ticktick.Task, fallbackProjectID string) map[st
 		grouped[projectID] = append(grouped[projectID], task.ID)
 	}
 	return grouped
+}
+
+// writableTaskProjects groups tasks by their real list. All, a folder, and a
+// smart list are views, so they are never sent to TickTick as the source list.
+func writableTaskProjects(tasks []ticktick.Task, fallbackProjectID string) (map[string][]string, error) {
+	if !realListID(fallbackProjectID) {
+		fallbackProjectID = ""
+	}
+	grouped := groupTasksByProject(tasks, fallbackProjectID)
+	if len(grouped) == 0 {
+		return nil, fmt.Errorf("no tasks selected")
+	}
+	for projectID := range grouped {
+		if !realListID(projectID) {
+			return nil, fmt.Errorf("task has no list")
+		}
+	}
+	return grouped, nil
 }

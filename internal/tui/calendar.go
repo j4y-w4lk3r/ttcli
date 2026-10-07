@@ -456,7 +456,10 @@ func (m model) renderCalWeekList(idx calIndex, l layout) string {
 			style := listIdleStyle
 			if entry.Done() {
 				marker = iconCheck
-				style = taskDoneStyle
+				style = closedTaskStyle(entry.Task)
+				if entry.Task.WontDo() {
+					marker = iconWont
+				}
 			}
 			if calWeekRowSelectable(selectedRow) &&
 				entry.SeriesID() == selectedRow.entry.SeriesID() &&
@@ -464,7 +467,7 @@ func (m model) renderCalWeekList(idx calIndex, l layout) string {
 				marker = iconTaskSel
 				style = taskSelStyle
 				if entry.Done() {
-					style = taskDoneStyle.Bold(true)
+					style = closedTaskStyle(entry.Task).Bold(true)
 				}
 			}
 			when := "all day"

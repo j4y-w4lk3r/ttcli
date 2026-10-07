@@ -228,6 +228,9 @@ TickTick account.
 Implemented: login/auto-refresh, `ls`, `tasks`, `add`, `done`, `rm`,
 `focus` (summary + live timer with TickTick sync), `raw`, **`tui`**
 (four views, cached startup/offline reads, daily task check-ins, habit
-check-ins, scrollable `?` help, Nerd Font icons).
+check-ins, scrollable `?` help, Nerd Font icons), **`ttcli mcp`**
+(search a task, read it, and update its title and notes), `i` in the
+task pane (one instruction, a preview, then save), and an optional Pushover
+alert when a focus session finishes.
 Planned: KOReader reading telemetry and an Open API OAuth option.
 See [docs/ROADMAP.md](docs/ROADMAP.md) for TUI phases and API strategy.

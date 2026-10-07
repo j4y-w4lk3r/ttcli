@@ -12,6 +12,46 @@ import (
 	"github.com/j4y-w4lk3r/ttcli/internal/ticktick"
 )
 
+func TestDayTimedBlockReadsAsADuration(t *testing.T) {
+	day := dateOnly(time.Now())
+	timed := calDayRow{
+		kind:     "task",
+		start:    day.Add(16 * time.Hour),
+		end:      day.Add(17 * time.Hour),
+		estimate: planning.TaskEstimate{Minutes: 60, Explicit: true},
+		entry:    calEntry{Task: ticktick.Task{ID: "yazi", Title: "yazi"}},
+	}
+	due := calDayRow{
+		kind:     "task",
+		start:    day.Add(5 * time.Hour),
+		estimate: planning.TaskEstimate{Minutes: 25},
+		entry:    calEntry{Task: ticktick.Task{ID: "wake", Title: "wake up"}},
+	}
+	visual := buildCalDayVisualRows([]calDayRow{
+		{kind: "slot"}, timed, {kind: "slot"}, due, {kind: "slot"},
+	}, 48)
+	timedRows, dueRows := 0, 0
+	for _, row := range visual {
+		switch row.row.entry.Task.ID {
+		case "yazi":
+			timedRows++
+		case "wake":
+			dueRows++
+		}
+	}
+	if timedRows < 2 || dueRows != 1 {
+		t.Fatalf("timed rows=%d due rows=%d", timedRows, dueRows)
+	}
+	last := stripANSI(renderCalDayTaskContinuation(timed, false, true, 80))
+	mid := stripANSI(renderCalDayTaskContinuation(timed, false, false, 80))
+	if !strings.Contains(last, "until 17:00") || !strings.Contains(last, "┗") {
+		t.Fatalf("last=%q", last)
+	}
+	if !strings.Contains(mid, "┃") || !strings.Contains(mid, "·") {
+		t.Fatalf("mid=%q", mid)
+	}
+}
+
 func TestSortTasksByDue(t *testing.T) {
 	tasks := []ticktick.Task{
 		{Title: "afternoon", DueDate: "2026-08-30T15:00:00.000+0200"},

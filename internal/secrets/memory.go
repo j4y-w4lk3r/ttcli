@@ -76,6 +76,34 @@ func (m *Memory) GetLogin(vault, itemRef string) (string, string, error) {
 	return it.Username, it.Password, nil
 }
 
+func (m *Memory) ItemsNamed(vault, title string) ([]Item, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	want := strings.ToLower(strings.TrimSpace(title))
+	var out []Item
+	for _, it := range m.items {
+		if want == "" || strings.ToLower(it.Title) != want {
+			continue
+		}
+		if vault != "" && !vaultMatches(vault, it.Vault) {
+			continue
+		}
+		out = append(out, Item{
+			Title:    it.Title,
+			Category: "LOGIN",
+			Vault:    it.Vault,
+			Fields: []Field{
+				{Label: "username", Purpose: "USERNAME", Value: it.Username},
+				{Label: "password", Purpose: "PASSWORD", Value: it.Password},
+			},
+		})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("memory: no item matching %q", title)
+	}
+	return out, nil
+}
+
 func (m *Memory) findLoginLocked(vaultFilter, title string) (loginLocation, error) {
 	want := strings.ToLower(strings.TrimSpace(title))
 	var matches []loginLocation

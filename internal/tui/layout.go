@@ -23,6 +23,19 @@ const (
 	footerRows = 1
 )
 
+// viewDrawWidth leaves the terminal's last column unused. A row that fills
+// that column makes some terminals wrap the cursor, so the next paint starts
+// one row lower and old calendar borders stay on screen.
+func viewDrawWidth(termW int) int {
+	if termW < 1 {
+		return 1
+	}
+	if termW == 1 {
+		return 1
+	}
+	return termW - 1
+}
+
 func (m model) layout() layout {
 	w, h := m.width, m.height
 	if w < 1 {
@@ -31,6 +44,7 @@ func (m model) layout() layout {
 	if h < 1 {
 		h = 24
 	}
+	w = viewDrawWidth(w)
 
 	// header + body + footer = termH (fixed row budget)
 	bodyLines := h - headerRows - footerRows

@@ -4,20 +4,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
-// MoveResult is returned when a task is moved between lists. TickTick reassigns
-// a new task id during copy+delete moves.
+// MoveResult is returned when a task is moved between lists. The task keeps
+// its id; NewTaskID and PreviousID are the same.
 type MoveResult struct {
 	NewTaskID  string
 	PreviousID string
 }
 
-// MoveTask moves a task to another list. The private API ignores projectId
-// changes on batch update, so this copies the task to the destination list
-// and deletes the original (same strategy as the TickTick web client's REST
-// fallback). The task id changes — see MoveResult.
+// MoveTask moves a task to another list. TickTick ignores projectId on a
+// batch update. The web client moves with POST /api/v2/batch/taskProject.
+// Copying and then deleting the original lands the original in Trash,
+// because that delete is TickTick's move-to-trash.
 func (c *Client) MoveTask(taskID, fromProjectRef, destProjectRef string) (MoveResult, error) {
 	task, err := c.findTaskRawByID(taskID, fromProjectRef)
 	if err != nil {
@@ -77,58 +78,71 @@ func (c *Client) moveTaskMap(task map[string]any, fromProjectRef, destProjectRef
 		}
 	}
 
-	copyTask := cloneTaskMap(task)
-	newID := generateID()
-	now := time.Now().UTC().Format(ticktickTimeLayout)
-	copyTask["id"] = newID
-	copyTask["projectId"] = toPID
-	copyTask["status"] = 0
-	copyTask["modifiedTime"] = now
-	delete(copyTask, "completedTime")
-	delete(copyTask, "completedUserId")
-	if _, ok := copyTask["createdTime"]; ok {
-		copyTask["createdTime"] = now
-	}
-
-	b, _ := json.Marshal(copyTask)
-	rb, err := c.do(http.MethodPost, "/api/v2/task", b)
+	items := []map[string]string{{
+		"taskId":        taskID,
+		"fromProjectId": fromPID,
+		"toProjectId":   toPID,
+	}}
+	b, err := json.Marshal(items)
 	if err != nil {
-		return MoveResult{}, fmt.Errorf("copy task to destination: %w", err)
+		return MoveResult{}, err
 	}
-	newID, err = parseTaskIDResponse(rb, newID)
+	raw, err := c.do(http.MethodPost, "/api/v2/batch/taskProject", b)
 	if err != nil {
-		return MoveResult{}, fmt.Errorf("copy task to destination: %w", err)
+		return MoveResult{}, err
 	}
-
-	if _, err := waitForTaskRaw(c, newID, toPID); err != nil {
-		return MoveResult{}, fmt.Errorf("copy task to destination: created id not found in %q: %w", destProjectRef, err)
+	var resp struct {
+		ID2Error map[string]any `json:"id2error"`
 	}
-
-	if err := c.DeleteTask(fromPID, taskID); err != nil {
-		return MoveResult{}, fmt.Errorf("remove task from source list: %w", err)
+	if len(strings.TrimSpace(string(raw))) > 0 && json.Unmarshal(raw, &resp) == nil && len(resp.ID2Error) > 0 {
+		return MoveResult{}, fmt.Errorf("move failed: %v", resp.ID2Error)
+	}
+	if err := c.confirmTaskMoved(fromPID, toPID, taskID); err != nil {
+		return MoveResult{}, err
 	}
 
 	if wasCompleted {
-		if err := c.CompleteTask(toPID, newID); err != nil {
-			return MoveResult{NewTaskID: newID, PreviousID: taskID},
+		if err := c.CompleteTask(toPID, taskID); err != nil {
+			return MoveResult{NewTaskID: taskID, PreviousID: taskID},
 				fmt.Errorf("moved task but could not mark completed: %w", err)
 		}
 	}
 
-	return MoveResult{NewTaskID: newID, PreviousID: taskID}, nil
+	return MoveResult{NewTaskID: taskID, PreviousID: taskID}, nil
 }
 
-func waitForTaskRaw(c *Client, id, projectRef string) (map[string]any, error) {
+func (c *Client) confirmTaskMoved(fromPID, toPID, taskID string) error {
 	var lastErr error
 	for attempt := 0; attempt < 5; attempt++ {
-		task, err := c.findTaskRawByID(id, projectRef)
-		if err == nil {
-			return task, nil
+		if attempt > 0 {
+			time.Sleep(200 * time.Millisecond)
 		}
-		lastErr = err
-		time.Sleep(200 * time.Millisecond)
+		inDest, err := c.projectHasLiveTask(toPID, taskID)
+		if err != nil {
+			return err
+		}
+		inSrc, err := c.projectHasLiveTask(fromPID, taskID)
+		if err != nil {
+			return err
+		}
+		if inDest && !inSrc {
+			return nil
+		}
+		lastErr = fmt.Errorf("move did not apply to task %s", taskID)
 	}
-	return nil, lastErr
+	return lastErr
+}
+
+func (c *Client) projectHasLiveTask(projectID, taskID string) (bool, error) {
+	byID, err := c.projectTaskMap(projectID)
+	if err != nil {
+		return false, err
+	}
+	task, ok := byID[taskID]
+	if !ok {
+		return false, nil
+	}
+	return deletedNum(task["deleted"]) == 0, nil
 }
 
 func taskMapStatus(task map[string]any) int {
@@ -155,36 +169,4 @@ func (c *Client) resolveSourceProject(task map[string]any, fromProjectRef string
 		return pid, nil
 	}
 	return "", fmt.Errorf("source list unknown — pass fromProjectRef")
-}
-
-func cloneTaskMap(task map[string]any) map[string]any {
-	b, err := json.Marshal(task)
-	if err != nil {
-		out := make(map[string]any, len(task))
-		for k, v := range task {
-			out[k] = v
-		}
-		return out
-	}
-	var out map[string]any
-	if err := json.Unmarshal(b, &out); err != nil {
-		out = make(map[string]any, len(task))
-		for k, v := range task {
-			out[k] = v
-		}
-	}
-	return out
-}
-
-func parseTaskIDResponse(rb []byte, fallback string) (string, error) {
-	if id, err := canonicalID(rb, fallback); err == nil && id != "" {
-		return id, nil
-	}
-	var task struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(rb, &task); err == nil && task.ID != "" {
-		return task.ID, nil
-	}
-	return fallback, nil
 }

@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/j4y-w4lk3r/ttcli/internal/listarchive"
 	"github.com/j4y-w4lk3r/ttcli/internal/sessionlog"
 	"github.com/j4y-w4lk3r/ttcli/internal/ticktick"
 )
@@ -33,13 +35,14 @@ func (m *model) openListPicker(purpose listPickerPurpose) {
 		if len(toMove) == 0 {
 			return
 		}
+		m.listPickerMoveTasks = append([]ticktick.Task(nil), toMove...)
 		m.listPickerTaskIDs = make([]string, len(toMove))
 		for i, t := range toMove {
 			m.listPickerTaskIDs[i] = t.ID
 		}
-		m.listPickerFromProject = m.projectID
-		if m.listPickerFromProject == "" {
-			m.listPickerFromProject = toMove[0].ProjectID
+		m.listPickerFromProject = sharedProjectID(toMove)
+		if m.listPickerFromProject == "" && !m.showsTaskListName() {
+			m.listPickerFromProject = m.projectID
 		}
 		for i, row := range m.listPickerRows {
 			if row.id == m.listPickerFromProject {
@@ -84,6 +87,9 @@ func (m model) buildListPickerRows(purpose listPickerPurpose) []listPickerRow {
 	default:
 		var rows []listPickerRow
 		for _, r := range m.selectableLists() {
+			if r.node.Kind != "list" {
+				continue
+			}
 			rows = append(rows, listPickerRow{id: r.node.ID, name: r.node.Name, kind: "list"})
 		}
 		return rows
@@ -129,8 +135,14 @@ func (m model) renderListPickerOverlay() string {
 			st = listSelStyle
 		}
 		icon := iconTaskOpen
+		if selected {
+			icon = iconListSelected
+		}
 		if row.kind == "folder" {
 			icon = iconFolder
+			if selected {
+				icon = iconFolderOpen
+			}
 		}
 		if row.kind == "none" {
 			icon = "○"
@@ -172,16 +184,17 @@ func (m model) updateListPicker(msg tea.KeyMsg) (model, tea.Cmd) {
 		dest := m.listPickerRows[m.listPickerCursor]
 		switch m.listPickerPurpose {
 		case pickerMoveTask:
-			if len(m.listPickerTaskIDs) == 0 {
+			pending := tasksLeavingProject(m.listPickerMoveTasks, dest.id, m.listPickerFromProject)
+			if len(m.listPickerMoveTasks) == 0 {
 				m.errMsg = "no tasks selected"
 				return m, nil
 			}
-			if dest.id == m.listPickerFromProject {
+			if len(pending) == 0 {
 				m.mode = modeNormal
 				m.toast = "already in that list"
 				return m, nil
 			}
-			return m, moveTasksCmd(m.client, m.listPickerTaskIDs, m.listPickerFromProject, dest.id, dest.name)
+			return m, moveTasksGroupedCmd(m.client, pending, dest.id, dest.name)
 		case pickerMoveList:
 			if m.listPickerListRef == "" {
 				m.errMsg = "select a list to move"
@@ -203,16 +216,72 @@ func (m model) updateListPicker(msg tea.KeyMsg) (model, tea.Cmd) {
 	return m, nil
 }
 
-func moveTasksCmd(c *ticktick.Client, taskIDs []string, fromProjectID, destProjectID, destName string) tea.Cmd {
+func moveTasksGroupedCmd(c *ticktick.Client, tasks []ticktick.Task, destProjectID, destName string) tea.Cmd {
 	return func() tea.Msg {
-		n, err := c.MoveTasks(taskIDs, fromProjectID, destProjectID)
-		if err != nil {
-			sessionlog.Appendf("task_move_fail", "count=%d from=%s to=%s ids=%v err=%v", len(taskIDs), fromProjectID, destProjectID, taskIDs, err)
-			return taskMovedMsg{destName: destName, count: n, err: err}
+		if c == nil {
+			return taskMovedMsg{destName: destName, err: fmt.Errorf("not connected")}
 		}
-		sessionlog.Appendf("task_move_ok", "count=%d to=%s", n, destName)
-		return taskMovedMsg{destName: destName, count: n, err: nil}
+		moved := 0
+		var lastErr error
+		for projectID, taskIDs := range groupTasksByProject(tasks, "") {
+			if !realListID(projectID) {
+				lastErr = fmt.Errorf("task has no list")
+				continue
+			}
+			n, err := c.MoveTasks(taskIDs, projectID, destProjectID)
+			moved += n
+			if err != nil {
+				lastErr = err
+			}
+		}
+		if moved == 0 && lastErr != nil {
+			sessionlog.Appendf("task_move_fail", "to=%s err=%v", destName, lastErr)
+			return taskMovedMsg{destName: destName, err: lastErr}
+		}
+		if lastErr != nil {
+			sessionlog.Appendf("task_move_fail", "moved=%d to=%s err=%v", moved, destName, lastErr)
+			return taskMovedMsg{destName: destName, count: moved, err: lastErr}
+		}
+		sessionlog.Appendf("task_move_ok", "count=%d to=%s", moved, destName)
+		return taskMovedMsg{destName: destName, count: moved, err: nil}
 	}
+}
+
+func tasksLeavingProject(tasks []ticktick.Task, destProjectID, fallbackProjectID string) []ticktick.Task {
+	if !realListID(fallbackProjectID) {
+		fallbackProjectID = ""
+	}
+	out := make([]ticktick.Task, 0, len(tasks))
+	for _, task := range tasks {
+		if task.ProjectID == "" {
+			task.ProjectID = fallbackProjectID
+		}
+		if task.ProjectID == destProjectID {
+			continue
+		}
+		out = append(out, task)
+	}
+	return out
+}
+
+func sharedProjectID(tasks []ticktick.Task) string {
+	if len(tasks) == 0 {
+		return ""
+	}
+	id := tasks[0].ProjectID
+	if !realListID(id) {
+		return ""
+	}
+	for _, task := range tasks[1:] {
+		if task.ProjectID != id {
+			return ""
+		}
+	}
+	return id
+}
+
+func realListID(id string) bool {
+	return id != "" && id != allTasksID && !strings.HasPrefix(id, "smart:")
 }
 
 func moveListCmd(c *ticktick.Client, listRef, folder string) tea.Cmd {
@@ -236,17 +305,196 @@ func createListCmd(c *ticktick.Client, name, folder string) tea.Cmd {
 	}
 }
 
-func deleteListOrFolderCmd(c *ticktick.Client, kind, ref string) tea.Cmd {
+type listDeleteRequest struct {
+	kind         string
+	ref          string
+	name         string
+	id           string
+	childListIDs []string
+}
+
+func deleteListOrFolderCmd(c *ticktick.Client, store *listarchive.Store, req listDeleteRequest) tea.Cmd {
 	return func() tea.Msg {
-		var err error
-		switch kind {
-		case "folder":
-			err = c.DeleteProjectGroup(ref)
-		default:
-			err = c.DeleteProject(ref)
+		msg := listDeletedMsg{kind: req.kind, name: req.name, id: req.id}
+		if c == nil {
+			msg.err = fmt.Errorf("not connected")
+			return msg
 		}
-		return listDeletedMsg{kind: kind, name: ref, err: err}
+		if req.kind != "folder" && isInboxRef(req.ref) {
+			msg.err = fmt.Errorf("inbox cannot be deleted")
+			return msg
+		}
+		var saved listarchive.Record
+		if store != nil {
+			record, err := snapshotDeletedList(c, req)
+			if err != nil {
+				msg.err = err
+				return msg
+			}
+			saved, err = store.Put(record)
+			if err != nil {
+				msg.err = fmt.Errorf("could not save list snapshot: %w", err)
+				return msg
+			}
+			msg.canUndo = true
+		}
+		var err error
+		switch req.kind {
+		case "folder":
+			err = c.DeleteProjectGroup(req.ref)
+		default:
+			err = c.DeleteProject(req.ref)
+		}
+		if err != nil {
+			if saved.ArchiveID != "" && store != nil {
+				_ = store.Delete(saved.ArchiveID)
+			}
+			msg.canUndo = false
+			msg.err = err
+			return msg
+		}
+		return msg
 	}
+}
+
+func snapshotDeletedList(c *ticktick.Client, req listDeleteRequest) (listarchive.Record, error) {
+	name := strings.TrimSpace(req.name)
+	if name == "" {
+		name = req.ref
+	}
+	if req.kind == "folder" {
+		return listarchive.Record{Kind: "folder", Name: name, ChildListIDs: req.childListIDs}, nil
+	}
+	snap, err := c.SnapshotProject(req.ref)
+	if err != nil {
+		return listarchive.Record{}, fmt.Errorf("could not snapshot list: %w", err)
+	}
+	raw, err := json.Marshal(snap.Project)
+	if err != nil {
+		return listarchive.Record{}, err
+	}
+	return listarchive.Record{Kind: "list", Name: name, Project: raw, Tasks: snap.Tasks}, nil
+}
+
+func undoDeletedListCmd(c *ticktick.Client, store *listarchive.Store) tea.Cmd {
+	return func() tea.Msg {
+		if c == nil || store == nil {
+			return listRestoredMsg{err: fmt.Errorf("nothing to undo")}
+		}
+		rec, ok, err := store.LatestPending()
+		if err != nil {
+			return listRestoredMsg{err: err}
+		}
+		if !ok {
+			return listRestoredMsg{err: fmt.Errorf("nothing to undo")}
+		}
+		if rec.Kind == "folder" {
+			return restoreDeletedFolder(c, store, rec)
+		}
+		return restoreDeletedList(c, store, rec)
+	}
+}
+
+func restoreDeletedList(c *ticktick.Client, store *listarchive.Store, rec listarchive.Record) tea.Msg {
+	var project map[string]any
+	if err := json.Unmarshal(rec.Project, &project); err != nil {
+		return listRestoredMsg{name: rec.Name, err: err}
+	}
+	snap := ticktick.ProjectSnapshot{Project: project, Tasks: rec.Tasks}
+	id := rec.NewProjectID
+	var n int
+	var err error
+	if id != "" {
+		n, err = c.RestoreProjectTasks(id, snap)
+	} else {
+		id, n, err = c.RestoreProjectSnapshot(snap)
+		if id != "" {
+			_ = store.NoteCreated(rec.ArchiveID, id)
+		}
+	}
+	if err != nil {
+		return listRestoredMsg{kind: "list", name: rec.Name, projectID: id, tasks: n, err: err}
+	}
+	if markErr := store.MarkRestored(rec.ArchiveID, id); markErr != nil {
+		return listRestoredMsg{kind: "list", name: rec.Name, projectID: id, tasks: n, err: markErr}
+	}
+	return listRestoredMsg{kind: "list", name: rec.Name, projectID: id, tasks: n}
+}
+
+func restoreDeletedFolder(c *ticktick.Client, store *listarchive.Store, rec listarchive.Record) tea.Msg {
+	id := rec.NewProjectID
+	if id == "" {
+		var err error
+		id, err = c.CreateProjectGroup(rec.Name)
+		if err != nil {
+			return listRestoredMsg{kind: "folder", name: rec.Name, err: err}
+		}
+		_ = store.NoteCreated(rec.ArchiveID, id)
+	}
+	moved := 0
+	var moveErr error
+	for _, child := range rec.ChildListIDs {
+		if err := c.MoveProject(child, id); err != nil {
+			if moveErr == nil {
+				moveErr = err
+			}
+			continue
+		}
+		moved++
+	}
+	if moveErr != nil {
+		return listRestoredMsg{kind: "folder", name: rec.Name, projectID: id, tasks: moved, err: moveErr}
+	}
+	if err := store.MarkRestored(rec.ArchiveID, id); err != nil {
+		return listRestoredMsg{kind: "folder", name: rec.Name, projectID: id, tasks: moved, err: err}
+	}
+	return listRestoredMsg{kind: "folder", name: rec.Name, projectID: id, tasks: moved}
+}
+
+func (m model) deleteFocusedList() (model, tea.Cmd) {
+	row, ok := m.currentListRowForRename()
+	if !ok {
+		m.errMsg = "select a list or folder to delete"
+		return m, nil
+	}
+	if row.node.Kind == "list" && isInboxRef(row.node.ID) {
+		m.errMsg = "inbox cannot be deleted"
+		return m, nil
+	}
+	ref := row.node.Name
+	if row.node.ID != "" {
+		ref = row.node.ID
+	}
+	return m, deleteListOrFolderCmd(m.client, m.listStore, listDeleteRequest{
+		kind:         row.node.Kind,
+		ref:          ref,
+		name:         row.node.Name,
+		id:           row.node.ID,
+		childListIDs: m.folderChildListIDs(m.listCursor),
+	})
+}
+
+func (m model) folderChildListIDs(cursor int) []string {
+	if cursor < 0 || cursor >= len(m.listRows) || m.listRows[cursor].node.Kind != "folder" {
+		return nil
+	}
+	depth := m.listRows[cursor].node.Depth
+	var ids []string
+	for i := cursor + 1; i < len(m.listRows); i++ {
+		next := m.listRows[i]
+		if next.node.Depth <= depth {
+			break
+		}
+		if next.node.Kind == "list" && next.node.ID != "" {
+			ids = append(ids, next.node.ID)
+		}
+	}
+	return ids
+}
+
+func isInboxRef(id string) bool {
+	id = strings.TrimSpace(id)
+	return strings.EqualFold(id, "inbox") || strings.HasPrefix(strings.ToLower(id), "inbox")
 }
 
 func (m model) listFolderContext() string {

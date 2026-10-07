@@ -105,6 +105,49 @@ func filterProjectTasks(tasks []Task, projectID string) []Task {
 	return filtered
 }
 
+func tasksWithProjectID(tasks []Task, projectID string) []Task {
+	filtered := make([]Task, 0, len(tasks))
+	for _, task := range tasks {
+		if task.ProjectID == projectID {
+			filtered = append(filtered, task)
+		}
+	}
+	return filtered
+}
+
+// mergeProjectTasks keeps the project feed as the source of truth for ids it
+// already contains, then appends completed tasks that feed left out.
+func mergeProjectTasks(base, completed []Task) []Task {
+	seen := make(map[string]struct{}, len(base)+len(completed))
+	out := make([]Task, 0, len(base)+len(completed))
+	for _, task := range base {
+		if task.ID != "" {
+			if _, ok := seen[task.ID]; ok {
+				continue
+			}
+			seen[task.ID] = struct{}{}
+		}
+		out = append(out, task)
+	}
+	for _, task := range completed {
+		if task.ID == "" || task.Trashed() {
+			continue
+		}
+		if _, ok := seen[task.ID]; ok {
+			continue
+		}
+		if !task.Done() {
+			if task.CompletedT == "" {
+				continue
+			}
+			task.Status = 2
+		}
+		seen[task.ID] = struct{}{}
+		out = append(out, task)
+	}
+	return out
+}
+
 func cloneProjects(projects []Project) []Project {
 	return append([]Project(nil), projects...)
 }
@@ -193,15 +236,110 @@ func (r *Repository) Tree(force bool) (TreeSnapshot, CacheMeta, error) {
 func (r *Repository) CachedProjectTasks(projectID string) ([]Task, CacheMeta, bool) {
 	r.mu.RLock()
 	entry, ok := r.snapshot.ProjectTasks[projectID]
+	history, historyOK := r.snapshot.CompletedByProject[projectID]
 	r.mu.RUnlock()
 	if !ok || !entry.present() {
 		return nil, CacheMeta{}, false
 	}
-	return cloneTasks(filterProjectTasks(entry.Value, projectID)), cacheMeta(entry, taskCacheTTL), true
+	tasks := filterProjectTasks(entry.Value, projectID)
+	if historyOK && history.present() {
+		tasks = mergeProjectTasks(tasks, tasksWithProjectID(history.Value, projectID))
+	}
+	return cloneTasks(tasks), cacheMeta(entry, taskCacheTTL), true
 }
 
 // ProjectTasks returns a list's tasks with short-lived read-through caching.
+// TickTick's project feed only embeds a handful of completed tasks, so the
+// result also includes that list's completed history.
 func (r *Repository) ProjectTasks(projectID string, force bool) ([]Task, CacheMeta, error) {
+	tasks, meta, err := r.projectTaskFeed(projectID, force)
+	if err != nil && tasks == nil {
+		return nil, meta, err
+	}
+	completed, cerr := r.projectCompleted(projectID, force)
+	if cerr != nil {
+		return tasks, meta, err
+	}
+	return mergeProjectTasks(tasks, tasksWithProjectID(completed, projectID)), meta, err
+}
+
+// SmartTasks returns an account-wide Completed, Won't Do, or Trash feed.
+func (r *Repository) SmartTasks(kind string, force bool) ([]Task, CacheMeta, error) {
+	r.mu.RLock()
+	entry, ok := r.snapshot.SmartTasks[kind]
+	r.mu.RUnlock()
+	if ok && !force && entry.fresh(time.Now(), taskCacheTTL) {
+		return cloneTasks(smartListTasks(kind, entry.Value)), cacheMeta(entry, taskCacheTTL), nil
+	}
+	value, err := r.fetch("smart:"+kind, func() (any, error) {
+		if r.client == nil {
+			return nil, fmt.Errorf("TickTick client unavailable")
+		}
+		var (
+			tasks []Task
+			err   error
+		)
+		switch kind {
+		case "completed":
+			tasks, err = r.client.AccountCompletedTasks()
+		case "abandoned":
+			tasks, err = r.client.AccountAbandonedTasks()
+		case "trash":
+			tasks, err = r.client.AccountTrashTasks()
+		default:
+			err = fmt.Errorf("unknown smart list %q", kind)
+		}
+		if err != nil {
+			return nil, err
+		}
+		tasks = smartListTasks(kind, tasks)
+		savedAt := time.Now()
+		r.mu.Lock()
+		if r.snapshot.SmartTasks == nil {
+			r.snapshot.SmartTasks = map[string]cacheEntry[[]Task]{}
+		}
+		r.snapshot.SmartTasks[kind] = cacheEntry[[]Task]{Value: cloneTasks(tasks), SavedAt: savedAt}
+		r.mu.Unlock()
+		r.persist()
+		return tasks, nil
+	})
+	if err == nil {
+		return cloneTasks(value.([]Task)), remoteMeta(time.Now()), nil
+	}
+	if ok && entry.present() {
+		meta := cacheMeta(entry, taskCacheTTL)
+		meta.Stale = true
+		return cloneTasks(smartListTasks(kind, entry.Value)), meta, err
+	}
+	return nil, CacheMeta{}, err
+}
+
+func smartListTasks(kind string, tasks []Task) []Task {
+	switch kind {
+	case "completed":
+		out := make([]Task, 0, len(tasks))
+		for _, task := range tasks {
+			if task.WontDo() || task.Trashed() || task.Status.Int() <= 0 {
+				continue
+			}
+			out = append(out, task)
+		}
+		return out
+	case "abandoned":
+		out := make([]Task, 0, len(tasks))
+		for _, task := range tasks {
+			if !task.WontDo() || task.Trashed() {
+				continue
+			}
+			out = append(out, task)
+		}
+		return out
+	default:
+		return tasks
+	}
+}
+
+func (r *Repository) projectTaskFeed(projectID string, force bool) ([]Task, CacheMeta, error) {
 	r.mu.RLock()
 	entry, ok := r.snapshot.ProjectTasks[projectID]
 	r.mu.RUnlock()
@@ -233,6 +371,40 @@ func (r *Repository) ProjectTasks(projectID string, force bool) ([]Task, CacheMe
 		return cloneTasks(filterProjectTasks(entry.Value, projectID)), meta, err
 	}
 	return nil, CacheMeta{}, err
+}
+
+func (r *Repository) projectCompleted(projectID string, force bool) ([]Task, error) {
+	r.mu.RLock()
+	entry, ok := r.snapshot.CompletedByProject[projectID]
+	r.mu.RUnlock()
+	if ok && !force && entry.fresh(time.Now(), taskCacheTTL) {
+		return cloneTasks(entry.Value), nil
+	}
+	value, err := r.fetch("project-completed:"+projectID, func() (any, error) {
+		if r.client == nil {
+			return nil, fmt.Errorf("TickTick client unavailable")
+		}
+		tasks, err := r.client.ProjectCompletedTasks(projectID)
+		if err != nil {
+			return nil, err
+		}
+		savedAt := time.Now()
+		r.mu.Lock()
+		if r.snapshot.CompletedByProject == nil {
+			r.snapshot.CompletedByProject = map[string]cacheEntry[[]Task]{}
+		}
+		r.snapshot.CompletedByProject[projectID] = cacheEntry[[]Task]{Value: cloneTasks(tasks), SavedAt: savedAt}
+		r.mu.Unlock()
+		r.persist()
+		return tasks, nil
+	})
+	if err == nil {
+		return cloneTasks(value.([]Task)), nil
+	}
+	if ok && entry.present() {
+		return cloneTasks(entry.Value), nil
+	}
+	return nil, err
 }
 
 // CachedOpenTasks returns the account-wide open-task snapshot.
@@ -663,6 +835,14 @@ func (r *Repository) InvalidateTasks(projectID string) {
 		r.snapshot.ProjectTasks[projectID] = entry
 	}
 	r.snapshot.OpenTasks.Dirty = true
+	if entry, ok := r.snapshot.CompletedByProject[projectID]; ok {
+		entry.Dirty = true
+		r.snapshot.CompletedByProject[projectID] = entry
+	}
+	for key, entry := range r.snapshot.SmartTasks {
+		entry.Dirty = true
+		r.snapshot.SmartTasks[key] = entry
+	}
 	for key, entry := range r.snapshot.CompletedDays {
 		entry.Dirty = true
 		r.snapshot.CompletedDays[key] = entry

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -218,5 +219,140 @@ func TestTasksCompletedOnFallsBackWhenRangeQueryFails(t *testing.T) {
 	}
 	if len(tasks) != 1 || rangeRequests != 1 || fallbackRequests != 1 {
 		t.Fatalf("tasks=%+v range=%d fallback=%d", tasks, rangeRequests, fallbackRequests)
+	}
+}
+
+func TestProjectCompletedTasksPagesUntilShortPage(t *testing.T) {
+	newest := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	middle := newest.Add(-time.Hour)
+	oldest := newest.Add(-2 * time.Hour)
+	ordered := []Task{
+		{ID: "new", ProjectID: "inbox1", Status: 2, CompletedT: newest.Format(ticktickTimeLayout)},
+		{ID: "mid", ProjectID: "inbox1", Status: 2, CompletedT: middle.Format(ticktickTimeLayout)},
+		{ID: "old", ProjectID: "inbox1", Status: 2, CompletedT: oldest.Format(ticktickTimeLayout)},
+	}
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if !strings.Contains(r.URL.Path, "/project/inbox1/completed/") {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Query().Get("status") != "" {
+			t.Errorf("status query=%q", r.URL.Query().Get("status"))
+		}
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		to, err := time.ParseInLocation(completedQueryLayout, r.URL.Query().Get("to"), time.UTC)
+		if err != nil || limit < 1 {
+			http.Error(w, "bad query", http.StatusBadRequest)
+			return
+		}
+		var page []Task
+		for _, task := range ordered {
+			completedAt, _ := ParseAPITime(task.CompletedT)
+			if completedAt.After(to) {
+				continue
+			}
+			page = append(page, task)
+			if len(page) == limit {
+				break
+			}
+		}
+		_ = json.NewEncoder(w).Encode(page)
+	}))
+	defer server.Close()
+
+	client := repositoryTestClient(server)
+	got, err := client.projectCompletedPaged("inbox1", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests < 2 {
+		t.Fatalf("requests=%d want at least 2", requests)
+	}
+	if len(got) != 3 || got[0].ID != "new" || got[1].ID != "mid" || got[2].ID != "old" {
+		t.Fatalf("tasks=%+v", got)
+	}
+}
+
+func TestAccountTrashAndAbandonedFeeds(t *testing.T) {
+	var trashStarts []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/trash/pagination"):
+			trashStarts = append(trashStarts, r.URL.Query().Get("start"))
+			if r.URL.Query().Get("start") == "0" {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"tasks":     []Task{{ID: "gone", Status: 0, Deleted: 1, Title: "trashed"}},
+					"nextStart": 1,
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"tasks":     []Task{{ID: "gone-2", Status: 0, Deleted: 2, Title: "trashed later"}},
+				"nextStart": -1,
+			})
+		default:
+			if r.URL.Query().Get("status") != "Abandoned" {
+				t.Errorf("status=%q", r.URL.Query().Get("status"))
+			}
+			_ = json.NewEncoder(w).Encode([]Task{{ID: "skip", Status: -1, Title: "won't"}})
+		}
+	}))
+	defer server.Close()
+	client := repositoryTestClient(server)
+	abandoned, err := client.AccountAbandonedTasks()
+	if err != nil || len(abandoned) != 1 || abandoned[0].Status.Int() != -1 {
+		t.Fatalf("abandoned=%+v err=%v", abandoned, err)
+	}
+	trashed, err := client.AccountTrashTasks()
+	if err != nil || len(trashed) != 2 || len(trashStarts) != 2 {
+		t.Fatalf("trash=%+v starts=%v err=%v", trashed, trashStarts, err)
+	}
+}
+
+func TestAllCompletedTasksPagesByOldestCompletion(t *testing.T) {
+	newest := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	middle := newest.Add(-time.Hour)
+	oldest := newest.Add(-2 * time.Hour)
+	ordered := []Task{
+		{ID: "new", Status: 2, CompletedT: newest.Format(ticktickTimeLayout)},
+		{ID: "mid", Status: 2, CompletedT: middle.Format(ticktickTimeLayout)},
+		{ID: "old", Status: 2, CompletedT: oldest.Format(ticktickTimeLayout)},
+	}
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		to, err := ParseAPITime(r.URL.Query().Get("to"))
+		if err != nil || limit < 1 {
+			http.Error(w, "bad query", http.StatusBadRequest)
+			return
+		}
+		var page []Task
+		for _, task := range ordered {
+			completedAt, _ := ParseAPITime(task.CompletedT)
+			if completedAt.After(to) {
+				continue
+			}
+			page = append(page, task)
+			if len(page) == limit {
+				break
+			}
+		}
+		_ = json.NewEncoder(w).Encode(page)
+	}))
+	defer server.Close()
+
+	client := repositoryTestClient(server)
+	got, err := client.completedTasksPaged(time.Date(2010, 1, 1, 0, 0, 0, 0, time.UTC), time.Now().Add(48*time.Hour), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests < 2 {
+		t.Fatalf("requests=%d want at least 2", requests)
+	}
+	if len(got) != 3 || got[0].ID != "new" || got[1].ID != "mid" || got[2].ID != "old" {
+		t.Fatalf("tasks=%+v", got)
 	}
 }
