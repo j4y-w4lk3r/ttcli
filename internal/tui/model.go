@@ -90,6 +90,7 @@ type model struct {
 	listCursor int
 
 	tasks                  []ticktick.Task
+	parentByID             map[string]ticktick.Task
 	visibleRows            []taskListRow
 	visibleRowsKey         visibleRowsCacheKey
 	visibleRowsReady       bool
@@ -458,9 +459,15 @@ type taskAddedMsg struct {
 }
 
 type taskMovedMsg struct {
+	destID   string
 	destName string
 	count    int
 	err      error
+}
+
+type parentsAttachedMsg struct {
+	projectID string
+	parents   []ticktick.Task
 }
 
 type taskDeletedMsg struct {
@@ -1461,7 +1468,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.noteCache(msg.cache, msg.err)
 		m.projectID = msg.projectID
 		m.projectName = msg.projectName
-		m.tasks = dedupeTasks(msg.tasks)
+		m.tasks = dedupeTasks(append(msg.tasks, m.knownParents(msg.tasks)...))
 		m.invalidateVisibleRows()
 		m.taskSortMode = m.uiSettings.sortForProject(msg.projectID, m.inboxID)
 		sortTasksForProject(m.tasks, m.taskSortMode)
@@ -1470,6 +1477,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.taskCursor = max(n-1, 0)
 		}
 		m.toast = ""
+		return m, m.attachMissingParentsCmd()
+
+	case parentsAttachedMsg:
+		if len(msg.parents) == 0 {
+			return m, nil
+		}
+		if m.parentByID == nil {
+			m.parentByID = map[string]ticktick.Task{}
+		}
+		for _, parent := range msg.parents {
+			if parent.ID != "" {
+				m.parentByID[parent.ID] = parent
+			}
+		}
+		if m.projectID != msg.projectID {
+			return m, nil
+		}
+		m.tasks = dedupeTasks(append(m.tasks, msg.parents...))
+		m.invalidateVisibleRows()
+		sortTasksForProject(m.tasks, m.taskSortMode)
+		m.applyFilter()
 		return m, nil
 
 	case taskReopenedMsg:
@@ -1548,6 +1576,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clearTaskMarks()
 		if m.repo != nil && (msg.err == nil || msg.count > 0) {
 			m.repo.InvalidateTasks(m.projectID)
+			if msg.destID != "" && msg.destID != m.projectID {
+				m.repo.InvalidateTasks(msg.destID)
+			}
 			m.repo.InvalidateTree()
 		}
 		if msg.err != nil {
@@ -3584,6 +3615,64 @@ func (m *model) visibleTaskRows() []taskListRow {
 
 func (m *model) visibleTaskCount() int {
 	return len(m.visibleTaskRows())
+}
+
+func missingParentIDs(tasks []ticktick.Task) []string {
+	have := make(map[string]bool, len(tasks))
+	for _, task := range tasks {
+		if task.ID != "" {
+			have[task.ID] = true
+		}
+	}
+	var ids []string
+	seen := map[string]bool{}
+	for _, task := range tasks {
+		if task.ParentID == "" || have[task.ParentID] || seen[task.ParentID] {
+			continue
+		}
+		seen[task.ParentID] = true
+		ids = append(ids, task.ParentID)
+	}
+	return ids
+}
+
+func (m model) knownParents(tasks []ticktick.Task) []ticktick.Task {
+	if len(m.parentByID) == 0 {
+		return nil
+	}
+	combined := append([]ticktick.Task{}, tasks...)
+	var out []ticktick.Task
+	for {
+		ids := missingParentIDs(combined)
+		if len(ids) == 0 {
+			return out
+		}
+		added := 0
+		for _, id := range ids {
+			parent, ok := m.parentByID[id]
+			if !ok {
+				continue
+			}
+			out = append(out, parent)
+			combined = append(combined, parent)
+			added++
+		}
+		if added == 0 {
+			return out
+		}
+	}
+}
+
+func (m model) attachMissingParentsCmd() tea.Cmd {
+	ids := missingParentIDs(m.tasks)
+	if len(ids) == 0 || m.client == nil {
+		return nil
+	}
+	projectID := m.projectID
+	c := m.client
+	return func() tea.Msg {
+		return parentsAttachedMsg{projectID: projectID, parents: c.MissingParentTasks(ids)}
+	}
 }
 
 func (m model) visibleTasks() []ticktick.Task {

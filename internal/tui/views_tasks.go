@@ -416,9 +416,35 @@ func closedTaskStyle(t ticktick.Task) lipgloss.Style {
 	}
 }
 
+func (m model) taskRowListName(t ticktick.Task) string {
+	if t.ProjectID == "" {
+		return ""
+	}
+	if m.showsTaskListName() || (t.ProjectID != m.projectID && realListID(m.projectID)) {
+		return m.listName(t.ProjectID)
+	}
+	return ""
+}
+
+func (m model) taskHasChildren(t ticktick.Task) bool {
+	if t.ID == "" {
+		return false
+	}
+	if len(t.ChildIDs) > 0 {
+		return true
+	}
+	for _, other := range m.tasks {
+		if other.ParentID == t.ID {
+			return true
+		}
+	}
+	return false
+}
+
 func (m model) formatTaskLine(t ticktick.Task, depth int, selected, marked bool, contentW int, layout taskRowLayout) string {
 	marker := iconTaskOpen
 	style := taskIdleStyle
+	hasChildren := m.taskHasChildren(t)
 
 	switch {
 	case t.Trashed():
@@ -430,6 +456,8 @@ func (m model) formatTaskLine(t ticktick.Task, depth int, selected, marked bool,
 	case t.Done():
 		marker = iconCheck
 		style = taskCompletedStyle
+	case hasChildren:
+		style = taskWontStyle
 	case selected:
 		if !marked {
 			marker = iconTaskSel
@@ -448,24 +476,25 @@ func (m model) formatTaskLine(t ticktick.Task, depth int, selected, marked bool,
 	if closed && marked {
 		style = style.Foreground(colorTeal).Bold(true)
 	}
-	if closed && selected {
+	if hasChildren && marked && !closed {
+		style = style.Foreground(colorTeal).Bold(true)
+	}
+	if selected {
 		style = style.Bold(true).Background(colorOverlay)
 	}
 	prefix := tree + style.Render(marker) + " "
 
 	title := style.Render(displayText(t.Title))
-	if m.showsTaskListName() {
-		if name := m.listName(t.ProjectID); name != "" {
-			namePart := hintStyle.Render(" · " + name)
-			budget := layout.TitleColW - lipgloss.Width(namePart)
-			if budget < 4 {
-				budget = 4
-			}
-			if lipgloss.Width(title) > budget {
-				title = truncateRenderedWidth(title, budget)
-			}
-			title += namePart
+	if name := m.taskRowListName(t); name != "" {
+		namePart := hintStyle.Render(" · " + name)
+		budget := layout.TitleColW - lipgloss.Width(namePart)
+		if budget < 4 {
+			budget = 4
 		}
+		if lipgloss.Width(title) > budget {
+			title = truncateRenderedWidth(title, budget)
+		}
+		title += namePart
 	}
 
 	var focusPart string
@@ -485,7 +514,7 @@ func (m model) formatTaskLine(t ticktick.Task, depth int, selected, marked bool,
 	}
 	due := padDueWidth(dueInlineTask(t))
 	line := formatTaskRow(prefix, title, focusPart, due, layout, contentW)
-	if !closed || !selected {
+	if !selected {
 		return line
 	}
 	plain := stripANSI(line)

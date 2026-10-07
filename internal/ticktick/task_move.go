@@ -27,27 +27,72 @@ func (c *Client) MoveTask(taskID, fromProjectRef, destProjectRef string) (MoveRe
 	return c.moveTaskMap(task, fromProjectRef, destProjectRef)
 }
 
-// MoveTasks moves multiple tasks to another list. Returns the number moved.
+// MoveTasks moves every task in one taskProject request. Completed tasks are
+// reopened, moved, then completed again. Returns the number moved.
 func (c *Client) MoveTasks(taskIDs []string, fromProjectRef, destProjectRef string) (int, error) {
 	if len(taskIDs) == 0 {
 		return 0, fmt.Errorf("no tasks to move")
 	}
-	moved := 0
-	var lastErr error
+	fromPID, err := c.ResolveProject(fromProjectRef)
+	if err != nil {
+		return 0, err
+	}
+	toPID, err := c.ResolveProject(destProjectRef)
+	if err != nil {
+		return 0, err
+	}
+	if fromPID == toPID {
+		return len(taskIDs), nil
+	}
+	var reopen, recomplete []string
+	items := make([]map[string]string, 0, len(taskIDs))
 	for _, id := range taskIDs {
-		if _, err := c.MoveTask(id, fromProjectRef, destProjectRef); err != nil {
-			lastErr = err
-			continue
+		task, err := c.findTaskRawByID(id, fromPID)
+		if err != nil {
+			return 0, err
 		}
-		moved++
+		switch taskMapStatus(task) {
+		case 2:
+			recomplete = append(recomplete, id)
+			reopen = append(reopen, id)
+		case 0:
+		default:
+			reopen = append(reopen, id)
+		}
+		items = append(items, map[string]string{
+			"taskId":        id,
+			"fromProjectId": fromPID,
+			"toProjectId":   toPID,
+		})
 	}
-	if moved == 0 && lastErr != nil {
-		return 0, lastErr
+	if len(reopen) > 0 {
+		if err := c.ReopenTasks(fromPID, reopen); err != nil {
+			return 0, err
+		}
 	}
-	if lastErr != nil {
-		return moved, fmt.Errorf("moved %d/%d: %w", moved, len(taskIDs), lastErr)
+	b, err := json.Marshal(items)
+	if err != nil {
+		return 0, err
 	}
-	return moved, nil
+	raw, err := c.do(http.MethodPost, "/api/v2/batch/taskProject", b)
+	if err != nil {
+		return 0, err
+	}
+	var resp struct {
+		ID2Error map[string]any `json:"id2error"`
+	}
+	if len(strings.TrimSpace(string(raw))) > 0 && json.Unmarshal(raw, &resp) == nil && len(resp.ID2Error) > 0 {
+		return 0, fmt.Errorf("move failed: %v", resp.ID2Error)
+	}
+	if err := c.confirmTasksMoved(fromPID, toPID, taskIDs); err != nil {
+		return 0, err
+	}
+	if len(recomplete) > 0 {
+		if err := c.CompleteTasks(toPID, recomplete); err != nil {
+			return len(taskIDs), fmt.Errorf("moved tasks but could not mark completed: %w", err)
+		}
+	}
+	return len(taskIDs), nil
 }
 
 func (c *Client) moveTaskMap(task map[string]any, fromProjectRef, destProjectRef string) (MoveResult, error) {
@@ -112,23 +157,41 @@ func (c *Client) moveTaskMap(task map[string]any, fromProjectRef, destProjectRef
 }
 
 func (c *Client) confirmTaskMoved(fromPID, toPID, taskID string) error {
+	return c.confirmTasksMoved(fromPID, toPID, []string{taskID})
+}
+
+func (c *Client) confirmTasksMoved(fromPID, toPID string, taskIDs []string) error {
 	var lastErr error
 	for attempt := 0; attempt < 5; attempt++ {
 		if attempt > 0 {
 			time.Sleep(200 * time.Millisecond)
 		}
-		inDest, err := c.projectHasLiveTask(toPID, taskID)
+		dest, err := c.projectTaskMap(toPID)
 		if err != nil {
 			return err
 		}
-		inSrc, err := c.projectHasLiveTask(fromPID, taskID)
+		src, err := c.projectTaskMap(fromPID)
 		if err != nil {
 			return err
 		}
-		if inDest && !inSrc {
+		lastErr = nil
+		for _, taskID := range taskIDs {
+			inDest := false
+			if task, ok := dest[taskID]; ok {
+				inDest = deletedNum(task["deleted"]) == 0
+			}
+			inSrc := false
+			if task, ok := src[taskID]; ok {
+				inSrc = deletedNum(task["deleted"]) == 0
+			}
+			if !inDest || inSrc {
+				lastErr = fmt.Errorf("move did not apply to task %s", taskID)
+				break
+			}
+		}
+		if lastErr == nil {
 			return nil
 		}
-		lastErr = fmt.Errorf("move did not apply to task %s", taskID)
 	}
 	return lastErr
 }

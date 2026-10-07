@@ -10,6 +10,54 @@ import (
 	"time"
 )
 
+// TaskByID loads one task, including a won't-do or cross-list parent that the
+// open project feed omits.
+func (c *Client) TaskByID(id string) (Task, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Task{}, fmt.Errorf("task id required")
+	}
+	raw, err := c.GetRaw("/api/v2/task/" + url.PathEscape(id))
+	if err != nil {
+		return Task{}, err
+	}
+	var task Task
+	if json.Unmarshal(raw, &task) == nil && task.ID == id {
+		return task, nil
+	}
+	for _, parsed := range parseTasks(raw) {
+		if parsed.ID == id {
+			return parsed, nil
+		}
+	}
+	return Task{}, fmt.Errorf("no task with id %q", id)
+}
+
+// MissingParentTasks loads parent tasks that are not already in the list.
+// A missing or deleted parent is skipped so the list can still render.
+func (c *Client) MissingParentTasks(ids []string) []Task {
+	var out []Task
+	seen := map[string]bool{}
+	queue := append([]string{}, ids...)
+	for len(queue) > 0 {
+		id := strings.TrimSpace(queue[0])
+		queue = queue[1:]
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		task, err := c.TaskByID(id)
+		if err != nil || task.ID == "" {
+			continue
+		}
+		out = append(out, task)
+		if task.ParentID != "" && !seen[task.ParentID] {
+			queue = append(queue, task.ParentID)
+		}
+	}
+	return out
+}
+
 // Ping checks that the API accepts authenticated requests.
 func (c *Client) Ping() error {
 	_, err := c.ListProjects()

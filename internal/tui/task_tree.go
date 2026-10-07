@@ -202,19 +202,48 @@ func appendTaskTreeForScope(
 	out *[]taskListRow,
 	placed map[string]bool,
 ) {
-	if placed[parent.ID] {
+	if parent.ID != "" && placed[parent.ID] {
 		return
 	}
-	visible := taskMatchesScope(parent, scope) && taskMatchesFilter(parent, filter)
-	childDepth := depth
-	if visible {
+	self := taskMatchesScope(parent, scope) && taskMatchesFilter(parent, filter)
+	kids := idx.ordered(parent)
+	childVisible := false
+	if !self {
+		for _, child := range kids {
+			if taskOrDescendantVisible(child, idx, scope, filter, map[string]bool{}) {
+				childVisible = true
+				break
+			}
+		}
+	}
+	if !self && !childVisible {
+		return
+	}
+	if parent.ID != "" {
 		placed[parent.ID] = true
-		*out = append(*out, taskListRow{Task: parent, Depth: depth})
-		childDepth++
 	}
-	for _, child := range idx.ordered(parent) {
-		appendTaskTreeForScope(child, childDepth, idx, scope, filter, out, placed)
+	*out = append(*out, taskListRow{Task: parent, Depth: depth})
+	for _, child := range kids {
+		appendTaskTreeForScope(child, depth+1, idx, scope, filter, out, placed)
 	}
+}
+
+func taskOrDescendantVisible(task ticktick.Task, idx taskChildren, scope TaskScope, filter string, seen map[string]bool) bool {
+	if task.ID != "" {
+		if seen[task.ID] {
+			return false
+		}
+		seen[task.ID] = true
+	}
+	if taskMatchesScope(task, scope) && taskMatchesFilter(task, filter) {
+		return true
+	}
+	for _, child := range idx.ordered(task) {
+		if taskOrDescendantVisible(child, idx, scope, filter, seen) {
+			return true
+		}
+	}
+	return false
 }
 
 func buildVisibleTaskRowsForScope(tasks []ticktick.Task, sortMode TaskSortMode, scope TaskScope, filter string) []taskListRow {
@@ -227,8 +256,8 @@ func buildVisibleTaskRowsForScope(tasks []ticktick.Task, sortMode TaskSortMode, 
 		seen[task.ID] = true
 		roots = append(roots, task)
 	}
-	sortTasksForProject(roots, sortMode)
 	idx := indexTaskChildren(tasks)
+	sortVisibleRoots(roots, idx, sortMode)
 	var out []taskListRow
 	placed := make(map[string]bool, len(tasks))
 	for _, root := range roots {
@@ -240,6 +269,26 @@ func buildVisibleTaskRowsForScope(tasks []ticktick.Task, sortMode TaskSortMode, 
 		}
 	}
 	return out
+}
+
+func sortVisibleRoots(roots []ticktick.Task, idx taskChildren, mode TaskSortMode) {
+	sort.SliceStable(roots, func(i, j int) bool {
+		return compareTasks(rootForSort(roots[i], idx), rootForSort(roots[j], idx), mode)
+	})
+}
+
+// rootForSort keeps a won't-do parent next to its open children in title order.
+func rootForSort(task ticktick.Task, idx taskChildren) ticktick.Task {
+	if !task.Done() || task.Trashed() {
+		return task
+	}
+	for _, child := range idx.ordered(task) {
+		if !child.Done() && !child.Trashed() {
+			task.Status = 0
+			return task
+		}
+	}
+	return task
 }
 
 func taskTreePrefix(depth int) string {

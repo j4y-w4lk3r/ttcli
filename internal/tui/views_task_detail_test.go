@@ -147,6 +147,24 @@ func TestVisibleTaskRowsIncludesSubtasks(t *testing.T) {
 	}
 }
 
+func TestOpenScopeKeepsAWontDoParentAboveItsChild(t *testing.T) {
+	tasks := []ticktick.Task{
+		{ID: "root", Title: "Zebra", ProjectID: "tech"},
+		{ID: "parent", Title: "Parent", Status: -1, ProjectID: "inbox"},
+		{ID: "child", Title: "Child item", ParentID: "parent", ProjectID: "tech"},
+	}
+	rows := buildVisibleTaskRowsForScope(tasks, TaskSortTitle, TaskScopeOpen, "")
+	if len(rows) != 3 {
+		t.Fatalf("rows=%d", len(rows))
+	}
+	if rows[0].Task.ID != "parent" || rows[0].Depth != 0 || rows[1].Task.ID != "child" || rows[1].Depth != 1 {
+		t.Fatalf("tree=%+v %+v %+v", rows[0], rows[1], rows[2])
+	}
+	if rows[2].Task.ID != "root" || rows[2].Depth != 0 {
+		t.Fatalf("root=%+v", rows[2])
+	}
+}
+
 func TestOrderedSubtasksUsesChildIDs(t *testing.T) {
 	parent := ticktick.Task{ID: "p1", ChildIDs: []string{"c2", "c1"}}
 	tasks := []ticktick.Task{

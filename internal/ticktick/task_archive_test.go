@@ -237,6 +237,23 @@ func TestPurgeTrashTasksRejectsATaskThatStaysInTrash(t *testing.T) {
 	}
 }
 
+func TestMissingParentTasksReadsTheParentByID(t *testing.T) {
+	const parentID = "0123456789abcdef01234567"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v2/task/"+parentID {
+			_, _ = w.Write([]byte(`{"id":"` + parentID + `","title":"Account","projectId":"inboxfixture","status":-1}`))
+			return
+		}
+		http.Error(w, r.URL.Path, http.StatusNotFound)
+	}))
+	defer server.Close()
+	client := repositoryTestClient(server)
+	parents := client.MissingParentTasks([]string{parentID})
+	if len(parents) != 1 || parents[0].ID != parentID || parents[0].Title != "Account" || !parents[0].WontDo() {
+		t.Fatalf("parents=%+v", parents)
+	}
+}
+
 func TestAbandonTasksSetsAbandonedStatus(t *testing.T) {
 	const projectID = "0123456789abcdef01234567"
 	const taskID = "abcdef0123456789abcdef01"

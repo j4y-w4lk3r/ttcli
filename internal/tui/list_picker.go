@@ -219,7 +219,7 @@ func (m model) updateListPicker(msg tea.KeyMsg) (model, tea.Cmd) {
 func moveTasksGroupedCmd(c *ticktick.Client, tasks []ticktick.Task, destProjectID, destName string) tea.Cmd {
 	return func() tea.Msg {
 		if c == nil {
-			return taskMovedMsg{destName: destName, err: fmt.Errorf("not connected")}
+			return taskMovedMsg{destID: destProjectID, destName: destName, err: fmt.Errorf("not connected")}
 		}
 		moved := 0
 		var lastErr error
@@ -236,14 +236,14 @@ func moveTasksGroupedCmd(c *ticktick.Client, tasks []ticktick.Task, destProjectI
 		}
 		if moved == 0 && lastErr != nil {
 			sessionlog.Appendf("task_move_fail", "to=%s err=%v", destName, lastErr)
-			return taskMovedMsg{destName: destName, err: lastErr}
+			return taskMovedMsg{destID: destProjectID, destName: destName, err: lastErr}
 		}
 		if lastErr != nil {
 			sessionlog.Appendf("task_move_fail", "moved=%d to=%s err=%v", moved, destName, lastErr)
-			return taskMovedMsg{destName: destName, count: moved, err: lastErr}
+			return taskMovedMsg{destID: destProjectID, destName: destName, count: moved, err: lastErr}
 		}
 		sessionlog.Appendf("task_move_ok", "count=%d to=%s", moved, destName)
-		return taskMovedMsg{destName: destName, count: moved, err: nil}
+		return taskMovedMsg{destID: destProjectID, destName: destName, count: moved, err: nil}
 	}
 }
 
