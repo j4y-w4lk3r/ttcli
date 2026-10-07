@@ -33,6 +33,31 @@ func (c *Client) TaskByID(id string) (Task, error) {
 	return Task{}, fmt.Errorf("no task with id %q", id)
 }
 
+// TasksByID loads each id and skips a task TickTick no longer has.
+func (c *Client) TasksByID(ids []string) []Task {
+	found, _ := c.ClassifyTaskIDs(ids)
+	return found
+}
+
+// ClassifyTaskIDs splits ids into tasks TickTick still has and ids it does not.
+func (c *Client) ClassifyTaskIDs(ids []string) (found []Task, missing []string) {
+	seen := map[string]bool{}
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		task, err := c.TaskByID(id)
+		if err != nil || task.ID == "" {
+			missing = append(missing, id)
+			continue
+		}
+		found = append(found, task)
+	}
+	return found, missing
+}
+
 // MissingParentTasks loads parent tasks that are not already in the list.
 // A missing or deleted parent is skipped so the list can still render.
 func (c *Client) MissingParentTasks(ids []string) []Task {
@@ -406,13 +431,18 @@ func (c *Client) FindTaskByID(id string) (map[string]any, error) {
 }
 
 // findTaskRawByID locates raw task JSON by id. Completed tasks live outside
-// /api/v2/project/all/tasks, so projectRef is checked first when provided.
+// /api/v2/project/all/tasks, so a real list is checked first, then the
+// single-task read and that list's completed feed.
 func (c *Client) findTaskRawByID(id, projectRef string) (map[string]any, error) {
-	var endpoints []string
+	var projectID string
 	if projectRef != "" {
 		if pid, err := c.ResolveProject(projectRef); err == nil {
-			endpoints = append(endpoints, "/api/v2/project/"+pid+"/tasks")
+			projectID = pid
 		}
+	}
+	var endpoints []string
+	if projectID != "" {
+		endpoints = append(endpoints, "/api/v2/project/"+projectID+"/tasks")
 	}
 	endpoints = append(endpoints,
 		"/api/v2/project/all/tasks",
@@ -431,7 +461,112 @@ func (c *Client) findTaskRawByID(id, projectRef string) (map[string]any, error) 
 			return task, nil
 		}
 	}
+	if projectID != "" {
+		if task, err := c.rawTaskByProject(projectID, id); err == nil {
+			return task, nil
+		}
+		if task, ok := c.findRawInCompletedFeed("/api/v2/project/"+url.PathEscape(projectID)+"/completed/", id); ok {
+			return task, nil
+		}
+	} else if task, ok := c.findRawInCompletedFeed("/api/v2/project/all/completed/", id); ok {
+		return task, nil
+	}
+	// Won't Do parents are omitted from the list feed. The same id read that
+	// draws the row still returns them.
+	if task, err := c.rawTaskByID(id); err == nil {
+		return task, nil
+	}
 	return nil, fmt.Errorf("no task with id %q", id)
+}
+
+func (c *Client) rawTaskByID(id string) (map[string]any, error) {
+	raw, err := c.GetRaw("/api/v2/task/" + url.PathEscape(id))
+	if err != nil {
+		return nil, err
+	}
+	var task map[string]any
+	if json.Unmarshal(raw, &task) == nil {
+		if got, _ := task["id"].(string); got == id {
+			return task, nil
+		}
+	}
+	tasks, err := parseTasksRaw(raw)
+	if err != nil {
+		return nil, fmt.Errorf("no task with id %q", id)
+	}
+	if task, ok := findTaskInRawList(tasks, id); ok {
+		return task, nil
+	}
+	return nil, fmt.Errorf("no task with id %q", id)
+}
+
+func (c *Client) rawTaskByProject(projectID, taskID string) (map[string]any, error) {
+	raw, err := c.GetRaw("/api/v2/task/" + url.PathEscape(taskID) + "?projectId=" + url.QueryEscape(projectID))
+	if err != nil {
+		return nil, err
+	}
+	var task map[string]any
+	if json.Unmarshal(raw, &task) != nil {
+		return nil, fmt.Errorf("no task with id %q", taskID)
+	}
+	if got, _ := task["id"].(string); got != taskID {
+		return nil, fmt.Errorf("no task with id %q", taskID)
+	}
+	return task, nil
+}
+
+func (c *Client) findRawInCompletedFeed(path, id string) (map[string]any, bool) {
+	to := time.Now().UTC().Add(time.Minute)
+	for page := 0; page < completedMaxPages; page++ {
+		values := url.Values{}
+		values.Set("from", "")
+		values.Set("to", to.UTC().Format(completedQueryLayout))
+		values.Set("limit", strconv.Itoa(projectCompletedPageLimit))
+		raw, err := c.GetRaw(path + "?" + values.Encode())
+		if err != nil {
+			return nil, false
+		}
+		tasks, err := parseTasksRaw(raw)
+		if err != nil || len(tasks) == 0 {
+			return nil, false
+		}
+		if task, ok := findTaskInRawList(tasks, id); ok {
+			return task, true
+		}
+		if len(tasks) < projectCompletedPageLimit {
+			return nil, false
+		}
+		oldest, ok := oldestRawCompletedTime(tasks)
+		if !ok {
+			return nil, false
+		}
+		next := oldest.UTC()
+		if !next.Before(to) {
+			next = to.Add(-time.Second)
+		}
+		to = next
+	}
+	return nil, false
+}
+
+func oldestRawCompletedTime(tasks []map[string]any) (time.Time, bool) {
+	var oldest time.Time
+	found := false
+	for _, task := range tasks {
+		raw, _ := task["completedTime"].(string)
+		if raw == "" {
+			continue
+		}
+		completedAt, err := ParseAPITime(raw)
+		if err != nil {
+			continue
+		}
+		if !found || completedAt.Before(oldest) {
+			oldest = completedAt
+			found = true
+		}
+	}
+	return oldest, found
 }
 
 func findTaskInRawList(tasks []map[string]any, id string) (map[string]any, bool) {

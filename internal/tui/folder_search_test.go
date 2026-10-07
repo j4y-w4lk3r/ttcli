@@ -98,6 +98,58 @@ func TestMoveFromAllUsesTheTasksOwnList(t *testing.T) {
 	}
 }
 
+func TestSameListMoveMakesMarkedSubtasksNormal(t *testing.T) {
+	m := fixtureModel(100, 30)
+	m.paneFocus = paneTasks
+	m.projectID = "p0"
+	m.tasks = []ticktick.Task{
+		{ID: "parent", Title: "curiosity", ProjectID: "p1"},
+		{ID: "swift", Title: "child a", ProjectID: "p0", ParentID: "parent"},
+		{ID: "iso", Title: "child b", ProjectID: "p0", ParentID: "parent"},
+	}
+	m.taskMarked = map[string]struct{}{"swift": {}, "iso": {}}
+	m.openListPicker(pickerMoveTask)
+	if m.listPickerCursor < 0 || m.listPickerRows[m.listPickerCursor].id != "p0" {
+		t.Fatalf("cursor row=%+v", m.listPickerRows)
+	}
+	out, cmd := m.updateListPicker(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil || out.toast == "already in that list" {
+		t.Fatalf("toast=%q cmd=%v", out.toast, cmd != nil)
+	}
+	msg, ok := cmd().(taskMovedMsg)
+	if !ok || msg.err == nil {
+		t.Fatalf("msg=%#v", msg)
+	}
+}
+
+func TestMakeParentChildrenNormalKey(t *testing.T) {
+	m := fixtureModel(100, 30)
+	m.paneFocus = paneTasks
+	m.tasks = []ticktick.Task{
+		{ID: "curiosity", Title: "curiosity", ProjectID: "p0", ChildIDs: []string{"iso", "terry", "gone"}},
+		{ID: "iso", Title: "child a", ProjectID: "p0", ParentID: "curiosity"},
+		{ID: "terry", Title: "child b", ProjectID: "p0", ParentID: "curiosity"},
+	}
+	m.taskCursor = 0
+	out, cmd := m.updateTasksKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'M'}})
+	if cmd == nil || out.toast != "making 3 tasks normal…" {
+		t.Fatalf("toast=%q cmd=%v", out.toast, cmd != nil)
+	}
+}
+
+func TestSameListMoveOfANormalTaskStaysPut(t *testing.T) {
+	m := fixtureModel(100, 30)
+	m.paneFocus = paneTasks
+	m.projectID = "p0"
+	m.tasks = []ticktick.Task{{ID: "plain", Title: "plain", ProjectID: "p0"}}
+	m.taskCursor = 0
+	m.openListPicker(pickerMoveTask)
+	out, cmd := m.updateListPicker(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil || out.toast != "already in that list" {
+		t.Fatalf("toast=%q cmd=%v", out.toast, cmd != nil)
+	}
+}
+
 func TestBackspaceOnAllTrashesTheTasksOwnList(t *testing.T) {
 	m := fixtureModel(100, 30)
 	m.paneFocus = paneLists

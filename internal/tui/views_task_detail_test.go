@@ -153,7 +153,7 @@ func TestOpenScopeKeepsAWontDoParentAboveItsChild(t *testing.T) {
 		{ID: "parent", Title: "Parent", Status: -1, ProjectID: "inbox"},
 		{ID: "child", Title: "Child item", ParentID: "parent", ProjectID: "tech"},
 	}
-	rows := buildVisibleTaskRowsForScope(tasks, TaskSortTitle, TaskScopeOpen, "")
+	rows := buildVisibleTaskRowsForScope(tasks, TaskSortTitle, TaskScopeOpen, "", nil)
 	if len(rows) != 3 {
 		t.Fatalf("rows=%d", len(rows))
 	}
@@ -162,6 +162,82 @@ func TestOpenScopeKeepsAWontDoParentAboveItsChild(t *testing.T) {
 	}
 	if rows[2].Task.ID != "root" || rows[2].Depth != 0 {
 		t.Fatalf("root=%+v", rows[2])
+	}
+}
+
+func TestParentChildIDsNestTasksWithAnEmptyParentField(t *testing.T) {
+	tasks := []ticktick.Task{
+		{ID: "parent", Title: "alpha", ProjectID: "prio", ChildIDs: []string{"uber", "code", "cull"}},
+		{ID: "uber", Title: "child a", ProjectID: "tech"},
+		{ID: "code", Title: "child b", ProjectID: "tech"},
+		{ID: "cull", Title: "done child", ProjectID: "tech", Status: 2},
+		{ID: "other", Title: "zeta", ProjectID: "purchase"},
+	}
+	rows := buildVisibleTaskRowsForScope(tasks, TaskSortTitle, TaskScopeAll, "", nil)
+	if len(rows) != 5 {
+		t.Fatalf("rows=%d %+v", len(rows), rows)
+	}
+	want := []struct {
+		id    string
+		depth int
+	}{
+		{"parent", 0},
+		{"uber", 1},
+		{"code", 1},
+		{"cull", 1},
+		{"other", 0},
+	}
+	for i, row := range want {
+		if rows[i].Task.ID != row.id || rows[i].Depth != row.depth {
+			t.Fatalf("row %d = %s depth %d", i, rows[i].Task.ID, rows[i].Depth)
+		}
+	}
+	open := buildVisibleTaskRowsForScope(tasks, TaskSortTitle, TaskScopeOpen, "", nil)
+	if len(open) != 4 || open[0].Task.ID != "parent" || open[3].Task.ID != "other" {
+		t.Fatalf("open=%+v", open)
+	}
+	for _, row := range open {
+		if row.Task.ID == "cull" {
+			t.Fatal("completed child should stay hidden in Open")
+		}
+	}
+}
+
+func TestChildIDsDoNotStealATaskThatNamesAnotherParent(t *testing.T) {
+	tasks := []ticktick.Task{
+		{ID: "fm0", Title: "fm0", ChildIDs: []string{"amazon", "domain", "gone"}},
+		{ID: "finance", Title: "alpha", ChildIDs: []string{"amazon", "domain"}},
+		{ID: "amazon", Title: "Amazon", ParentID: "finance", ProjectID: "fm"},
+		{ID: "domain", Title: "domain", ParentID: "finance", ProjectID: "tech"},
+	}
+	rows := buildVisibleTaskRowsForScope(tasks, TaskSortTitle, TaskScopeAll, "", nil)
+	var got []string
+	for _, row := range rows {
+		got = append(got, fmt.Sprintf("%s:%d", row.Task.ID, row.Depth))
+	}
+	want := []string{"finance:0", "amazon:1", "domain:1", "fm0:0"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("rows=%v", got)
+	}
+}
+
+func TestStaleChildListingIsTheParentThatDoesNotMatch(t *testing.T) {
+	tasks := []ticktick.Task{
+		{ID: "fm0", ChildIDs: []string{"amazon", "note"}},
+		{ID: "finance", ChildIDs: []string{"amazon"}},
+		{ID: "amazon", ParentID: "finance"},
+		{ID: "note"},
+	}
+	stale := staleChildListings(tasks)
+	if len(stale["fm0"]) != 1 || stale["fm0"][0] != "amazon" || len(stale["finance"]) != 0 {
+		t.Fatalf("stale=%v", stale)
+	}
+	keep := keepLoadedChildren(tasks[:1], []ticktick.Task{
+		{ID: "amazon", ParentID: "finance"},
+		{ID: "note"},
+	})
+	if len(keep) != 1 || keep[0].ID != "note" {
+		t.Fatalf("keep=%v", keep)
 	}
 }
 

@@ -26,7 +26,12 @@ func (c *Client) ListProjectGroups() ([]ProjectGroup, error) {
 			live = append(live, g)
 		}
 	}
-	sort.Slice(live, func(i, j int) bool { return live[i].SortOrder < live[j].SortOrder })
+	sort.Slice(live, func(i, j int) bool {
+		if live[i].SortOrder != live[j].SortOrder {
+			return live[i].SortOrder < live[j].SortOrder
+		}
+		return live[i].ID < live[j].ID
+	})
 	return dedupeGroups(live), nil
 }
 
@@ -131,7 +136,12 @@ func ProjectTree(groups []ProjectGroup, projects []Project) []ProjectTreeNode {
 	}
 
 	sortProjects := func(ps []Project) {
-		sort.Slice(ps, func(i, j int) bool { return ps[i].SortOrder < ps[j].SortOrder })
+		sort.Slice(ps, func(i, j int) bool {
+			if ps[i].SortOrder != ps[j].SortOrder {
+				return ps[i].SortOrder < ps[j].SortOrder
+			}
+			return ps[i].ID < ps[j].ID
+		})
 	}
 
 	placed := make(map[string]struct{}, len(projects))

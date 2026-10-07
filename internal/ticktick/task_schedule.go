@@ -72,6 +72,7 @@ type TaskUpdateInput struct {
 	ClearRecurrence bool
 	FocusPlan       *TaskFocusPlan
 	ClearParent     bool
+	OldParentID     string
 }
 
 // UpdateTask updates task fields and due date / reminder / duration.
@@ -101,17 +102,257 @@ func (c *Client) UpdateTask(taskID, projectRef string, in TaskUpdateInput) error
 		return err
 	}
 	if clearParent {
-		return c.clearTaskParent(task)
+		return c.clearTaskParent(task, in.OldParentID)
+	}
+	return nil
+}
+
+// ForgetStaleChildIDs removes child ids from a parent when those tasks
+// already name a different parent. TickTick ignores childIds on a normal
+// task update, so this reaffirms the child's real parent and names the
+// stale parent as oldParentId. The child's parent field stays as it is.
+func (c *Client) ForgetStaleChildIDs(parentID string, drop []string) error {
+	parentID = strings.TrimSpace(parentID)
+	dropSet := map[string]bool{}
+	for _, id := range drop {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			dropSet[id] = true
+		}
+	}
+	if parentID == "" || len(dropSet) == 0 {
+		return nil
+	}
+	parent, err := c.TaskByID(parentID)
+	if err != nil {
+		return err
+	}
+	listed := map[string]bool{}
+	for _, id := range parent.ChildIDs {
+		listed[id] = true
+	}
+	keptParent := map[string]string{}
+	var items []map[string]string
+	for id := range dropSet {
+		if !listed[id] {
+			continue
+		}
+		child, err := c.TaskByID(id)
+		if err != nil {
+			continue
+		}
+		if child.ParentID == "" || child.ParentID == parentID || child.ProjectID == "" {
+			continue
+		}
+		items = append(items, map[string]string{
+			"taskId":      id,
+			"projectId":   child.ProjectID,
+			"parentId":    child.ParentID,
+			"oldParentId": parentID,
+		})
+		keptParent[id] = child.ParentID
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	body, err := json.Marshal(items)
+	if err != nil {
+		return err
+	}
+	raw, err := c.do(http.MethodPost, "/api/v2/batch/taskParent", body)
+	if err != nil {
+		return err
+	}
+	var resp struct {
+		ID2Error map[string]any `json:"id2error"`
+	}
+	if len(strings.TrimSpace(string(raw))) > 0 && json.Unmarshal(raw, &resp) == nil && len(resp.ID2Error) > 0 {
+		return fmt.Errorf("could not drop the extra parent: %v", resp.ID2Error)
+	}
+	updated, err := c.TaskByID(parentID)
+	if err != nil {
+		return err
+	}
+	for _, id := range updated.ChildIDs {
+		if keptParent[id] != "" {
+			return fmt.Errorf("parent still lists %s", id)
+		}
+	}
+	for id, pid := range keptParent {
+		child, err := c.TaskByID(id)
+		if err != nil {
+			return err
+		}
+		if child.ParentID != pid {
+			return fmt.Errorf("task %s parent changed", id)
+		}
+	}
+	return nil
+}
+
+// TaskParentLink names a subtask and the parent to detach.
+type TaskParentLink struct {
+	TaskID      string
+	OldParentID string
+}
+
+// MakeTasksNormal detaches every subtask in one parent update. The task
+// stays on its current list.
+func (c *Client) MakeTasksNormal(links []TaskParentLink) (int, error) {
+	seen := map[string]bool{}
+	var items []map[string]string
+	type check struct {
+		taskID   string
+		parentID string
+	}
+	var checks []check
+	dropped := 0
+	for _, link := range links {
+		taskID := strings.TrimSpace(link.TaskID)
+		parentID := strings.TrimSpace(link.OldParentID)
+		if taskID == "" || parentID == "" || seen[taskID] {
+			continue
+		}
+		seen[taskID] = true
+		task, err := c.TaskByID(taskID)
+		if err != nil || task.ID == "" {
+			if err := c.DropMissingChildIDs(parentID, []string{taskID}); err != nil {
+				return 0, err
+			}
+			dropped++
+			continue
+		}
+		if task.ProjectID == "" {
+			continue
+		}
+		items = append(items, map[string]string{
+			"taskId":      taskID,
+			"projectId":   task.ProjectID,
+			"oldParentId": parentID,
+		})
+		checks = append(checks, check{taskID: taskID, parentID: parentID})
+	}
+	if len(items) == 0 {
+		return dropped, nil
+	}
+	body, err := json.Marshal(items)
+	if err != nil {
+		return 0, err
+	}
+	raw, err := c.do(http.MethodPost, "/api/v2/batch/taskParent", body)
+	if err != nil {
+		return 0, err
+	}
+	var resp struct {
+		ID2Error map[string]any `json:"id2error"`
+	}
+	if len(strings.TrimSpace(string(raw))) > 0 && json.Unmarshal(raw, &resp) == nil && len(resp.ID2Error) > 0 {
+		return 0, fmt.Errorf("could not make the task a normal task: %v", resp.ID2Error)
+	}
+	for _, item := range checks {
+		updated, err := c.TaskByID(item.taskID)
+		if err != nil {
+			return 0, err
+		}
+		if updated.ParentID != "" {
+			return 0, fmt.Errorf("task is still a subtask")
+		}
+		parent, err := c.TaskByID(item.parentID)
+		if err != nil {
+			continue
+		}
+		for _, id := range parent.ChildIDs {
+			if id == item.taskID {
+				return 0, fmt.Errorf("task is still a subtask")
+			}
+		}
+	}
+	return len(checks) + dropped, nil
+}
+
+// DropMissingChildIDs removes child ids that TickTick can no longer load.
+// The parent update reports EXISTED for the missing task and still clears
+// that id from the parent's subtask list.
+func (c *Client) DropMissingChildIDs(parentID string, childIDs []string) error {
+	parentID = strings.TrimSpace(parentID)
+	if parentID == "" || len(childIDs) == 0 {
+		return nil
+	}
+	parent, err := c.TaskByID(parentID)
+	if err != nil {
+		return err
+	}
+	if parent.ProjectID == "" {
+		return fmt.Errorf("task has no list")
+	}
+	listed := map[string]bool{}
+	for _, id := range parent.ChildIDs {
+		listed[id] = true
+	}
+	seen := map[string]bool{}
+	var items []map[string]string
+	for _, id := range childIDs {
+		id = strings.TrimSpace(id)
+		if id == "" || id == parentID || seen[id] || !listed[id] {
+			continue
+		}
+		if task, err := c.TaskByID(id); err == nil && task.ID != "" {
+			continue
+		}
+		seen[id] = true
+		items = append(items, map[string]string{
+			"taskId":      id,
+			"projectId":   parent.ProjectID,
+			"oldParentId": parentID,
+		})
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	body, err := json.Marshal(items)
+	if err != nil {
+		return err
+	}
+	raw, err := c.do(http.MethodPost, "/api/v2/batch/taskParent", body)
+	if err != nil {
+		return err
+	}
+	var resp struct {
+		ID2Error map[string]any `json:"id2error"`
+	}
+	if len(strings.TrimSpace(string(raw))) > 0 && json.Unmarshal(raw, &resp) == nil {
+		for id, value := range resp.ID2Error {
+			if seen[id] && fmt.Sprint(value) == "EXISTED" {
+				continue
+			}
+			if value != nil && fmt.Sprint(value) != "" && fmt.Sprint(value) != "EXISTED" {
+				return fmt.Errorf("could not drop the missing subtask: %v", resp.ID2Error)
+			}
+		}
+	}
+	updated, err := c.TaskByID(parentID)
+	if err != nil {
+		return err
+	}
+	for _, id := range updated.ChildIDs {
+		if seen[id] {
+			return fmt.Errorf("parent still lists %s", id)
+		}
 	}
 	return nil
 }
 
 // clearTaskParent removes a subtask link. TickTick ignores parentId on a
 // normal task update; the web client uses POST /api/v2/batch/taskParent.
-func (c *Client) clearTaskParent(task map[string]any) error {
+// oldParentID covers a child that no longer stores a parent id while the
+// parent still lists it.
+func (c *Client) clearTaskParent(task map[string]any, oldParentID string) error {
 	taskID, _ := task["id"].(string)
 	projectID, _ := task["projectId"].(string)
-	parentID, _ := task["parentId"].(string)
+	parentID := strings.TrimSpace(oldParentID)
+	if parentID == "" {
+		parentID, _ = task["parentId"].(string)
+	}
 	if taskID == "" || parentID == "" {
 		return nil
 	}
@@ -143,7 +384,33 @@ func (c *Client) clearTaskParent(task map[string]any) error {
 	if pid, _ := updated["parentId"].(string); pid != "" {
 		return fmt.Errorf("task is still a subtask")
 	}
+	parent, err := c.findTaskRawByID(parentID, "")
+	if err != nil {
+		return nil
+	}
+	for _, id := range childIDsOf(parent) {
+		if id == taskID {
+			return fmt.Errorf("task is still a subtask")
+		}
+	}
 	return nil
+}
+
+func childIDsOf(task map[string]any) []string {
+	switch ids := task["childIds"].(type) {
+	case []string:
+		return ids
+	case []any:
+		out := make([]string, 0, len(ids))
+		for _, id := range ids {
+			if s, ok := id.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 // ApplyTaskSchedule sets start/due, reminder, and duration on a raw task map.

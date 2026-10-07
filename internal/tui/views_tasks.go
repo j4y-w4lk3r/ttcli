@@ -196,7 +196,9 @@ func (m model) renderLists(l layout) string {
 	}
 	win := computeScrollWindow(scrollCursor, projectEnd, projectBudget)
 	hint := ""
-	if projectEnd > projectBudget {
+	if m.mode == modeReorderList {
+		hint = truncateInner(hintStyle.Render("j/k · enter · esc"), contentW)
+	} else if projectEnd > projectBudget {
 		hint = truncateInner(m.scrollHint(win), contentW)
 	}
 
@@ -319,8 +321,8 @@ func (m model) renderTasks(l layout) string {
 	tasks := m.visibleTaskRows()
 	if len(tasks) == 0 {
 		total, matching, _ := m.taskScopeStats()
-		label := strings.ToLower(m.effectiveTaskScope().Label())
-		if isSmartList(m.projectID) || m.showsTaskListName() {
+		label := strings.ToLower(m.taskListScope().Label())
+		if m.projectID != allTasksID && m.showsTaskListName() {
 			label = "open"
 		}
 		msg := fmt.Sprintf("(no %s tasks)", label)
@@ -353,8 +355,8 @@ func (m model) selectedTask() (ticktick.Task, bool) {
 
 func (m model) openDoneHint() string {
 	total, matching, shown := m.taskScopeStats()
-	scopeLabel := m.effectiveTaskScope().Label()
-	if m.showsTaskListName() {
+	scopeLabel := m.taskListScope().Label()
+	if m.projectID != allTasksID && m.showsTaskListName() {
 		scopeLabel = "open"
 	}
 	parts := []string{fmt.Sprintf("%s · %d total", scopeLabel, total)}
@@ -430,8 +432,17 @@ func (m model) taskHasChildren(t ticktick.Task) bool {
 	if t.ID == "" {
 		return false
 	}
-	if len(t.ChildIDs) > 0 {
-		return true
+	byID := make(map[string]ticktick.Task, len(m.tasks))
+	for _, other := range m.tasks {
+		if other.ID != "" {
+			byID[other.ID] = other
+		}
+	}
+	for _, id := range t.ChildIDs {
+		child, ok := byID[id]
+		if !ok || child.ParentID == "" || child.ParentID == t.ID {
+			return true
+		}
 	}
 	for _, other := range m.tasks {
 		if other.ParentID == t.ID {

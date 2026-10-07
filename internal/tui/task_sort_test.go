@@ -34,8 +34,48 @@ func TestTaskSortModeNext(t *testing.T) {
 	if TaskSortCustom.Next() != TaskSortDue {
 		t.Fatal("custom should advance to due")
 	}
-	if TaskSortTitle.Next() != TaskSortCustom {
-		t.Fatal("title should wrap to custom")
+	if TaskSortTitle.Next() != TaskSortList {
+		t.Fatal("title should advance to list")
+	}
+	if TaskSortList.Next() != TaskSortCustom {
+		t.Fatal("list should wrap to custom")
+	}
+}
+
+func TestTaskSortListGroupsByListThenTitle(t *testing.T) {
+	tasks := []ticktick.Task{
+		{ID: "tech-done", Title: "alpha", ProjectID: "tech", Status: 2},
+		{ID: "inbox-b", Title: "bravo", ProjectID: "inbox"},
+		{ID: "tech-open", Title: "zeta", ProjectID: "tech"},
+		{ID: "inbox-a", Title: "alpha", ProjectID: "inbox"},
+		{ID: "child", Title: "aaa child", ProjectID: "tech", ParentID: "inbox-b"},
+	}
+	names := func(id string) string {
+		switch id {
+		case "inbox":
+			return "Inbox"
+		case "tech":
+			return "tech"
+		default:
+			return ""
+		}
+	}
+	rows := buildVisibleTaskRowsForScope(tasks, TaskSortList, TaskScopeAll, "", names)
+	var got []string
+	for _, row := range rows {
+		got = append(got, row.Task.ID)
+	}
+	want := []string{"inbox-a", "inbox-b", "child", "tech-open", "tech-done"}
+	if len(got) != len(want) {
+		t.Fatalf("rows=%v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("rows=%v", got)
+		}
+	}
+	if rows[2].Depth != 1 {
+		t.Fatalf("child depth=%d", rows[2].Depth)
 	}
 }
 

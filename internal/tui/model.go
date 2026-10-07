@@ -51,6 +51,7 @@ const (
 	modeRenameHabit
 	modeFocusPicker
 	modeListPicker
+	modeReorderList
 	modeAddList
 	modeAddFolder
 	modeConfirmDelete
@@ -112,6 +113,8 @@ type model struct {
 	projectID   string
 	projectName string
 	inboxID     string
+	groups      []ticktick.ProjectGroup
+	projects    []ticktick.Project
 
 	addInput             textinput.Model
 	taskTitleInput       textinput.Model
@@ -127,6 +130,7 @@ type model struct {
 	addTaskRepeatIdx     int
 	addTaskRepeatFromIdx int
 	editTaskID           string
+	editTaskProjectID    string
 	editTaskParentID     string
 	editTaskParentTitle  string
 	editTaskParentIdx    int
@@ -145,6 +149,12 @@ type model struct {
 	listPickerMoveTasks   []ticktick.Task
 	listPickerFromProject string
 	listPickerListRef     string
+
+	reorderKind     string
+	reorderID       string
+	reorderName     string
+	reorderProjects []ticktick.Project
+	reorderGroups   []ticktick.ProjectGroup
 
 	calDate         time.Time
 	calMode         calMode
@@ -348,6 +358,8 @@ func (m *model) hydrateCachedData() {
 	}
 	if tree, meta, ok := m.repo.CachedTree(); ok {
 		projects := ticktick.OpenProjects(tree.Projects, false)
+		m.groups = append([]ticktick.ProjectGroup(nil), tree.Groups...)
+		m.projects = append([]ticktick.Project(nil), projects...)
 		m.tree = ticktick.ProjectTreeWithInbox(tree.InboxID, tree.Groups, projects)
 		m.inboxID = tree.InboxID
 		m.listRows = buildListRows(m.tree)
@@ -360,7 +372,7 @@ func (m *model) hydrateCachedData() {
 			if tasks, taskMeta, found := m.repo.CachedProjectTasks(row.node.ID); found {
 				m.tasks = dedupeTasks(tasks)
 				m.taskSortMode = m.uiSettings.sortForProject(row.node.ID, m.inboxID)
-				sortTasksForProject(m.tasks, m.taskSortMode)
+				sortTasksForProjectNamed(m.tasks, m.taskSortMode, m.listName)
 				m.noteCache(taskMeta, nil)
 				m.loading = false
 			}
@@ -468,6 +480,7 @@ type taskMovedMsg struct {
 	destID     string
 	destName   string
 	count      int
+	madeNormal int
 	err        error
 	nextUndo   *taskUndo
 	invalidate []string
@@ -476,6 +489,13 @@ type taskMovedMsg struct {
 type parentsAttachedMsg struct {
 	projectID string
 	parents   []ticktick.Task
+}
+
+type childLinksResolvedMsg struct {
+	projectID string
+	keep      []ticktick.Task
+	dropped   map[string][]string
+	err       error
 }
 
 type taskDeletedMsg struct {
@@ -502,6 +522,7 @@ type taskCheckinMsg struct {
 
 type listMovedMsg struct {
 	folder string
+	what   string
 	err    error
 }
 
@@ -539,8 +560,9 @@ type listRenamedMsg struct {
 }
 
 type taskUpdatedMsg struct {
-	title string
-	err   error
+	title     string
+	projectID string
+	err       error
 }
 
 type taskRenamedMsg struct {
@@ -693,17 +715,69 @@ func loadTasksCmd(repo *ticktick.Repository, projectID, projectName string, forc
 	}
 }
 
-func loadAllTasksCmd(repo *ticktick.Repository, force bool) tea.Cmd {
+func loadAllTasksCmd(repo *ticktick.Repository, scope TaskScope, force bool) tea.Cmd {
 	return func() tea.Msg {
 		if repo == nil {
 			return tasksLoadedMsg{projectID: allTasksID, projectName: "All", err: fmt.Errorf("TickTick data repository unavailable")}
 		}
-		tasks, cache, err := repo.OpenTasks(force)
+		tasks, cache, err := tasksForAllList(repo, scope, force)
 		return tasksLoadedMsg{
 			projectID: allTasksID, projectName: "All", tasks: tasks,
 			cache: cache, err: err,
 		}
 	}
+}
+
+// tasksForAllList loads the feed the All list needs for the selected scope.
+// Open stays the account-wide open feed. All adds completed and Won't Do tasks.
+func tasksForAllList(repo *ticktick.Repository, scope TaskScope, force bool) ([]ticktick.Task, ticktick.CacheMeta, error) {
+	switch normalizeTaskScope(scope) {
+	case TaskScopeDone:
+		return repo.SmartTasks("completed", force)
+	case TaskScopeTrash:
+		return repo.SmartTasks("trash", force)
+	case TaskScopeAll:
+		return mergedAllListTasks(repo, force)
+	default:
+		return repo.OpenTasks(force)
+	}
+}
+
+func mergedAllListTasks(repo *ticktick.Repository, force bool) ([]ticktick.Task, ticktick.CacheMeta, error) {
+	open, cache, err := repo.OpenTasks(force)
+	if err != nil && len(open) == 0 {
+		return nil, cache, err
+	}
+	completed, completedCache, cerr := repo.SmartTasks("completed", force)
+	abandoned, abandonedCache, aerr := repo.SmartTasks("abandoned", force)
+	tasks := dedupeTasks(append(append(append([]ticktick.Task{}, open...), completed...), abandoned...))
+	cache = freshestCache(cache, completedCache, abandonedCache)
+	if err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = aerr
+	}
+	if err != nil && len(tasks) > 0 && !cache.FromCache {
+		return tasks, cache, nil
+	}
+	return tasks, cache, err
+}
+
+func freshestCache(metas ...ticktick.CacheMeta) ticktick.CacheMeta {
+	var best ticktick.CacheMeta
+	for _, meta := range metas {
+		if meta.SavedAt.After(best.SavedAt) {
+			best = meta
+		}
+		if meta.FromCache {
+			best.FromCache = true
+		}
+		if meta.Stale {
+			best.Stale = true
+		}
+	}
+	return best
 }
 
 func loadFolderTasksCmd(repo *ticktick.Repository, folderID, name string, childIDs []string, force bool) tea.Cmd {
@@ -1420,6 +1494,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeListPicker {
 			return m.updateListPicker(msg)
 		}
+		if m.mode == modeReorderList {
+			return m.updateReorderList(msg)
+		}
 		if m.mode == modeAskAI || m.mode == modeAskAIPreview {
 			return m.updateAskAI(msg)
 		}
@@ -1432,6 +1509,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.noteCache(msg.cache, msg.err)
+		m.groups = append([]ticktick.ProjectGroup(nil), msg.groups...)
+		m.projects = append([]ticktick.Project(nil), msg.projects...)
 		m.tree = ticktick.ProjectTreeWithInbox(msg.inboxID, msg.groups, msg.projects)
 		m.inboxID = msg.inboxID
 		m.listRows = buildListRows(m.tree)
@@ -1472,7 +1551,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		if msg.err != nil && !m.noteCache(msg.cache, msg.err) {
 			m.errMsg = msg.err.Error()
-			return m, nil
+			if len(msg.tasks) == 0 {
+				return m, nil
+			}
 		}
 		m.noteCache(msg.cache, msg.err)
 		m.projectID = msg.projectID
@@ -1480,13 +1561,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tasks = dedupeTasks(append(msg.tasks, m.knownParents(msg.tasks)...))
 		m.invalidateVisibleRows()
 		m.taskSortMode = m.uiSettings.sortForProject(msg.projectID, m.inboxID)
-		sortTasksForProject(m.tasks, m.taskSortMode)
+		sortTasksForProjectNamed(m.tasks, m.taskSortMode, m.listName)
 		m.applyFilter()
 		if n := m.visibleTaskCount(); m.taskCursor >= n {
 			m.taskCursor = max(n-1, 0)
 		}
 		m.toast = ""
-		return m, m.attachMissingParentsCmd()
+		return m, tea.Batch(m.attachMissingParentsCmd(), m.resolveChildLinksCmd())
 
 	case parentsAttachedMsg:
 		if len(msg.parents) == 0 {
@@ -1505,9 +1586,44 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.tasks = dedupeTasks(append(m.tasks, msg.parents...))
 		m.invalidateVisibleRows()
-		sortTasksForProject(m.tasks, m.taskSortMode)
+		sortTasksForProjectNamed(m.tasks, m.taskSortMode, m.listName)
 		m.applyFilter()
-		return m, nil
+		return m, m.resolveChildLinksCmd()
+
+	case childLinksResolvedMsg:
+		if msg.err != nil {
+			m.errMsg = msg.err.Error()
+		}
+		if m.projectID != msg.projectID || (len(msg.keep) == 0 && len(msg.dropped) == 0) {
+			return m, nil
+		}
+		if len(msg.keep) > 0 {
+			if m.parentByID == nil {
+				m.parentByID = map[string]ticktick.Task{}
+			}
+			for _, task := range msg.keep {
+				if task.ID != "" {
+					m.parentByID[task.ID] = task
+				}
+			}
+			m.tasks = dedupeTasks(append(m.tasks, msg.keep...))
+		}
+		for i, task := range m.tasks {
+			ids := msg.dropped[task.ID]
+			if len(ids) == 0 {
+				continue
+			}
+			m.tasks[i] = withoutChildIDs(task, ids)
+			if m.parentByID != nil {
+				if cached, ok := m.parentByID[task.ID]; ok {
+					m.parentByID[task.ID] = withoutChildIDs(cached, ids)
+				}
+			}
+		}
+		m.invalidateVisibleRows()
+		sortTasksForProjectNamed(m.tasks, m.taskSortMode, m.listName)
+		m.applyFilter()
+		return m, m.resolveChildLinksCmd()
 
 	case taskReopenedMsg:
 		m.clearTaskMarks()
@@ -1583,7 +1699,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case taskMovedMsg:
 		m.mode = modeNormal
 		m.clearTaskMarks()
-		if m.repo != nil && (msg.err == nil || msg.count > 0) {
+		if m.repo != nil && (msg.err == nil || msg.count > 0 || msg.madeNormal > 0) {
 			m.repo.InvalidateTasks(m.projectID)
 			if msg.destID != "" && msg.destID != m.projectID {
 				m.repo.InvalidateTasks(msg.destID)
@@ -1598,15 +1714,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			if msg.count > 0 {
 				m.noteTaskUndo(msg.nextUndo, fmt.Sprintf("%s moved %d to %s (some failed)", iconCheck, msg.count, msg.destName))
+			} else if msg.destName == "" {
+				m.toast = iconOverdue + " could not make tasks normal"
 			} else {
 				m.toast = iconOverdue + " move failed"
 			}
 			m.errMsg = msg.err.Error()
 			return m, tea.Batch(loadTreeCmd(m.repo, false), m.reloadCurrentTasks(false))
 		}
+		if msg.count == 0 && msg.madeNormal == 0 && msg.destName == "" {
+			m.toast = "no subtasks to update"
+			return m, m.reloadCurrentTasks(false)
+		}
 		toast := iconCheck + " moved to " + msg.destName
-		if msg.count > 1 {
+		if msg.count == 0 && msg.madeNormal > 0 {
+			toast = iconCheck + " made a normal task"
+			if msg.madeNormal > 1 {
+				toast = fmt.Sprintf("%s made %d tasks normal", iconCheck, msg.madeNormal)
+			}
+		} else if msg.count > 1 {
 			toast = fmt.Sprintf("%s moved %d tasks to %s", iconCheck, msg.count, msg.destName)
+			if msg.madeNormal > 0 {
+				toast += " as normal tasks"
+			}
+		} else if msg.madeNormal > 0 {
+			toast += " as a normal task"
 		}
 		m.noteTaskUndo(msg.nextUndo, toast)
 		return m, tea.Batch(loadTreeCmd(m.repo, false), m.reloadCurrentTasks(false))
@@ -1701,12 +1833,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mode = modeNormal
 		if msg.err != nil {
 			m.errMsg = msg.err.Error()
+			if m.repo != nil {
+				return m, loadTreeCmd(m.repo, false)
+			}
 			return m, nil
 		}
 		if m.repo != nil {
 			m.repo.InvalidateTree()
 		}
-		m.toast = iconCheck + " list moved"
+		what := msg.what
+		if what == "" {
+			what = "list"
+		}
+		m.toast = iconCheck + " " + what + " moved"
 		return m, loadTreeCmd(m.repo, false)
 
 	case listAddedMsg:
@@ -1810,7 +1949,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.repo != nil {
-			m.repo.InvalidateTasks(m.projectID)
+			m.repo.InvalidateTasks(msg.projectID)
+			if msg.projectID != m.projectID {
+				m.repo.InvalidateTasks(m.projectID)
+			}
 		}
 		m.toast = fmt.Sprintf("%s updated %q", iconCheck, msg.title)
 		return m, m.reloadCurrentTasks(false)
@@ -2491,6 +2633,26 @@ func (m model) updateTasksKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, nil
 		}
 		return m, copyTaskTitleCmd(title)
+	case "Y":
+		if m.paneFocus != paneTasks {
+			return m, nil
+		}
+		t, ok := m.selectedTask()
+		if !ok {
+			m.errMsg = "select a task to duplicate"
+			return m, nil
+		}
+		if t.Trashed() {
+			m.errMsg = "task is in trash"
+			return m, nil
+		}
+		in, err := duplicateCreateInput(t, m.taskWriteFallback())
+		if err != nil {
+			m.errMsg = err.Error()
+			return m, nil
+		}
+		m.toast = "duplicating…"
+		return m, createTaskCmd(m.client, in)
 	case "e":
 		if m.paneFocus == paneTasks {
 			t, ok := m.selectedTask()
@@ -2549,15 +2711,20 @@ func (m model) updateTasksKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, nil
 		}
 		if m.paneFocus == paneLists {
-			row, ok := m.currentListRowForRename()
-			if !ok || row.node.Kind != "list" {
-				m.errMsg = "select a list to move"
-				return m, nil
-			}
-			m.openListPicker(pickerMoveList)
-			return m, nil
+			return m.beginReorder()
 		}
 		return m, nil
+	case "M":
+		if m.paneFocus != paneTasks {
+			return m, nil
+		}
+		links := m.linksToMakeNormal()
+		if len(links) == 0 {
+			m.errMsg = "select a parent or mark subtasks"
+			return m, nil
+		}
+		m.toast = fmt.Sprintf("making %d tasks normal…", len(links))
+		return m, makeTasksNormalCmd(m.client, links)
 	case "i":
 		if m.paneFocus == paneTasks {
 			return m.beginAskAI()
@@ -2663,11 +2830,13 @@ func (m model) updateTasksKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	case "c":
 		if m.paneFocus == paneTasks {
 			m = m.setTaskScope(m.effectiveTaskScope().Next())
+			return m.reloadAllForScope()
 		}
 		return m, nil
 	case "C":
 		if m.paneFocus == paneTasks {
 			m = m.setTaskScope(m.effectiveTaskScope().Prev())
+			return m.reloadAllForScope()
 		}
 		return m, nil
 	case "o", "O":
@@ -2679,7 +2848,7 @@ func (m model) updateTasksKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			} else {
 				m.toast = "sort: " + m.taskSortMode.Label()
 			}
-			sortTasksForProject(m.tasks, m.taskSortMode)
+			sortTasksForProjectNamed(m.tasks, m.taskSortMode, m.listName)
 			m.applyFilter()
 		}
 		return m, nil
@@ -2725,7 +2894,22 @@ func (m model) updateTasksKey(msg tea.KeyMsg) (model, tea.Cmd) {
 					return m, nil
 				}
 			}
-			return m, reopenTasksCmd(m.client, toReopen, m.taskWriteFallback())
+			var wontDo, completed []ticktick.Task
+			for _, task := range toReopen {
+				if task.WontDo() {
+					wontDo = append(wontDo, task)
+					continue
+				}
+				completed = append(completed, task)
+			}
+			var cmds []tea.Cmd
+			if len(wontDo) > 0 {
+				cmds = append(cmds, reopenAbandonedTasksCmd(m.client, wontDo, m.taskWriteFallback()))
+			}
+			if len(completed) > 0 {
+				cmds = append(cmds, reopenTasksCmd(m.client, completed, m.taskWriteFallback()))
+			}
+			return m, tea.Batch(cmds...)
 		}
 		toComplete := m.tasksToComplete()
 		if len(toComplete) == 0 {
@@ -3622,10 +3806,7 @@ func (m *model) visibleTaskRows() []taskListRow {
 		m.visibleFocusColW = maxTaskFocusInlineW(*m, rows)
 		return rows
 	}
-	scope := m.effectiveTaskScope()
-	if isSmartList(m.projectID) || m.showsTaskListName() {
-		scope = TaskScopeAll
-	}
+	scope := m.taskListScope()
 	key := visibleRowsCacheKey{
 		stamp:   taskListStamp(m.tasks),
 		scope:   scope,
@@ -3636,7 +3817,7 @@ func (m *model) visibleTaskRows() []taskListRow {
 	if m.visibleRowsReady && m.visibleRowsKey == key {
 		return m.visibleRows
 	}
-	rows := buildVisibleTaskRowsForScope(m.tasks, m.taskSortMode, scope, key.filter)
+	rows := buildVisibleTaskRowsForScope(m.tasks, m.taskSortMode, scope, key.filter, m.listName)
 	m.visibleRows = rows
 	m.visibleRowsKey = key
 	m.visibleRowsReady = true
@@ -3674,7 +3855,7 @@ func (m model) knownParents(tasks []ticktick.Task) []ticktick.Task {
 	combined := append([]ticktick.Task{}, tasks...)
 	var out []ticktick.Task
 	for {
-		ids := missingParentIDs(combined)
+		ids := append(missingParentIDs(combined), missingChildIDs(combined)...)
 		if len(ids) == 0 {
 			return out
 		}
@@ -3690,6 +3871,155 @@ func (m model) knownParents(tasks []ticktick.Task) []ticktick.Task {
 		}
 		if added == 0 {
 			return out
+		}
+	}
+}
+
+func missingChildIDs(tasks []ticktick.Task) []string {
+	have := make(map[string]bool, len(tasks))
+	for _, task := range tasks {
+		if task.ID != "" {
+			have[task.ID] = true
+		}
+	}
+	var ids []string
+	seen := map[string]bool{}
+	for _, task := range tasks {
+		for _, id := range task.ChildIDs {
+			if id == "" || id == task.ID || have[id] || seen[id] {
+				continue
+			}
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func staleChildListings(tasks []ticktick.Task) map[string][]string {
+	byID := make(map[string]ticktick.Task, len(tasks))
+	for _, task := range tasks {
+		if task.ID != "" {
+			byID[task.ID] = task
+		}
+	}
+	out := map[string][]string{}
+	seen := map[string]bool{}
+	for _, parent := range tasks {
+		if parent.ID == "" {
+			continue
+		}
+		for _, id := range parent.ChildIDs {
+			child, ok := byID[id]
+			if !ok || child.ParentID == "" || child.ParentID == parent.ID {
+				continue
+			}
+			key := parent.ID + "\n" + id
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out[parent.ID] = append(out[parent.ID], id)
+		}
+	}
+	return out
+}
+
+func keepLoadedChildren(existing, loaded []ticktick.Task) []ticktick.Task {
+	listers := map[string][]string{}
+	for _, parent := range existing {
+		for _, id := range parent.ChildIDs {
+			listers[id] = append(listers[id], parent.ID)
+		}
+	}
+	var keep []ticktick.Task
+	for _, task := range loaded {
+		if task.ID == "" {
+			continue
+		}
+		if task.ParentID == "" {
+			keep = append(keep, task)
+			continue
+		}
+		for _, parentID := range listers[task.ID] {
+			if parentID == task.ParentID {
+				keep = append(keep, task)
+				break
+			}
+		}
+	}
+	return keep
+}
+
+func withoutChildIDs(task ticktick.Task, drop []string) ticktick.Task {
+	if len(drop) == 0 {
+		return task
+	}
+	gone := map[string]bool{}
+	for _, id := range drop {
+		gone[id] = true
+	}
+	next := make([]string, 0, len(task.ChildIDs))
+	for _, id := range task.ChildIDs {
+		if !gone[id] {
+			next = append(next, id)
+		}
+	}
+	task.ChildIDs = next
+	return task
+}
+
+func (m model) resolveChildLinksCmd() tea.Cmd {
+	if m.client == nil {
+		return nil
+	}
+	ids := missingChildIDs(m.tasks)
+	existing := append([]ticktick.Task{}, m.tasks...)
+	if len(ids) == 0 && len(staleChildListings(existing)) == 0 {
+		return nil
+	}
+	projectID := m.projectID
+	c := m.client
+	return func() tea.Msg {
+		loaded, missing := c.ClassifyTaskIDs(ids)
+		combined := append(append([]ticktick.Task{}, existing...), loaded...)
+		dropped := map[string][]string{}
+		var err error
+		for parentID, childIDs := range staleChildListings(combined) {
+			if e := c.ForgetStaleChildIDs(parentID, childIDs); e != nil {
+				if err == nil {
+					err = e
+				}
+				continue
+			}
+			dropped[parentID] = childIDs
+		}
+		missingSet := map[string]bool{}
+		for _, id := range missing {
+			missingSet[id] = true
+		}
+		missingByParent := map[string][]string{}
+		for _, parent := range existing {
+			for _, id := range parent.ChildIDs {
+				if missingSet[id] {
+					missingByParent[parent.ID] = append(missingByParent[parent.ID], id)
+				}
+			}
+		}
+		for parentID, childIDs := range missingByParent {
+			if e := c.DropMissingChildIDs(parentID, childIDs); e != nil {
+				if err == nil {
+					err = e
+				}
+				continue
+			}
+			dropped[parentID] = append(dropped[parentID], childIDs...)
+		}
+		return childLinksResolvedMsg{
+			projectID: projectID,
+			keep:      keepLoadedChildren(existing, loaded),
+			dropped:   dropped,
+			err:       err,
 		}
 	}
 }
@@ -3759,7 +4089,7 @@ func (m model) reloadCurrentTasks(force bool) tea.Cmd {
 	case row.node.Kind == "folder":
 		return loadFolderTasksCmd(m.repo, row.node.ID, row.node.Name, m.folderChildListIDs(m.listCursor), force)
 	case row.node.ID == allTasksID:
-		return loadAllTasksCmd(m.repo, force)
+		return loadAllTasksCmd(m.repo, m.effectiveTaskScope(), force)
 	case row.node.Kind == "smart":
 		return loadSmartTasksCmd(m.repo, row.node.ID, row.node.Name, force)
 	default:

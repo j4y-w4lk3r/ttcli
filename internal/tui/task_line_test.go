@@ -52,6 +52,26 @@ func TestParentTaskUsesTheWontDoColor(t *testing.T) {
 	}
 }
 
+func TestParentListingAnotherParentsChildIsNotYellow(t *testing.T) {
+	withTrueColor(t)
+	m := fixtureModel(100, 30)
+	m.tasks = []ticktick.Task{
+		{ID: "fm0", Title: "fm0", ChildIDs: []string{"amazon"}},
+		{ID: "finance", Title: "Parent", ChildIDs: []string{"amazon"}},
+		{ID: "amazon", Title: "Amazon", ParentID: "finance"},
+	}
+	layout := taskRowLayout{TitleColW: 24, SuffixCol: 28}
+	fm0 := m.formatTaskLine(m.tasks[0], 0, false, false, 80, layout)
+	finance := m.formatTaskLine(m.tasks[1], 0, false, false, 80, layout)
+	want := foregroundSeq(taskWontStyle.Render("Parent"))
+	if foregroundSeq(finance) != want {
+		t.Fatalf("finance %q", finance)
+	}
+	if foregroundSeq(fm0) == want {
+		t.Fatalf("fm0 stayed yellow: %q", fm0)
+	}
+}
+
 func TestSelectedRowPaintsThePomoCountWithTheTitle(t *testing.T) {
 	withTrueColor(t)
 	m := fixtureModel(120, 40)

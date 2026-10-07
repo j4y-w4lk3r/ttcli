@@ -192,7 +192,11 @@ func compareTasksByDue(a, b ticktick.Task) bool {
 }
 
 func sortTasksForProject(tasks []ticktick.Task, mode TaskSortMode) {
-	sortTasks(tasks, mode)
+	sortTasksNamed(tasks, mode, nil)
+}
+
+func sortTasksForProjectNamed(tasks []ticktick.Task, mode TaskSortMode, listName func(string) string) {
+	sortTasksNamed(tasks, mode, listName)
 }
 
 func splitAllDayTasks(tasks []ticktick.Task) (allDay, timed []ticktick.Task) {

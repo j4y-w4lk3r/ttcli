@@ -80,6 +80,7 @@ const (
 	TaskSortDue      TaskSortMode = "due"
 	TaskSortPriority TaskSortMode = "priority"
 	TaskSortTitle    TaskSortMode = "title"
+	TaskSortList     TaskSortMode = "list"
 )
 
 func (m TaskSortMode) Label() string {
@@ -90,6 +91,8 @@ func (m TaskSortMode) Label() string {
 		return "priority"
 	case TaskSortTitle:
 		return "title"
+	case TaskSortList:
+		return "list"
 	default:
 		return "custom"
 	}
@@ -103,6 +106,8 @@ func (m TaskSortMode) Next() TaskSortMode {
 		return TaskSortPriority
 	case TaskSortPriority:
 		return TaskSortTitle
+	case TaskSortTitle:
+		return TaskSortList
 	default:
 		return TaskSortCustom
 	}

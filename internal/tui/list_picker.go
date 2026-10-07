@@ -112,6 +112,9 @@ func (m model) renderListPickerOverlay() string {
 	var lines []string
 	lines = append(lines, helpInnerLine(headerStyle.Render(iconList+"  "+title), innerW))
 	if m.listPickerPurpose == pickerMoveTask {
+		if len(m.subtaskParentLinks(m.listPickerMoveTasks)) > 0 {
+			lines = append(lines, helpInnerLine(hintStyle.Render("subtasks become normal tasks"), innerW))
+		}
 		switch len(m.listPickerTaskIDs) {
 		case 1:
 			if t, ok := m.selectedTask(); ok {
@@ -185,16 +188,23 @@ func (m model) updateListPicker(msg tea.KeyMsg) (model, tea.Cmd) {
 		switch m.listPickerPurpose {
 		case pickerMoveTask:
 			pending := tasksLeavingProject(m.listPickerMoveTasks, dest.id, m.listPickerFromProject)
+			links := m.subtaskParentLinks(m.listPickerMoveTasks)
 			if len(m.listPickerMoveTasks) == 0 {
 				m.errMsg = "no tasks selected"
 				return m, nil
 			}
-			if len(pending) == 0 {
+			if len(pending) == 0 && len(links) == 0 {
 				m.mode = modeNormal
 				m.toast = "already in that list"
 				return m, nil
 			}
-			return m, moveTasksGroupedCmd(m.client, pending, dest.id, dest.name)
+			m.mode = modeNormal
+			if len(pending) == 0 {
+				m.toast = fmt.Sprintf("making %d tasks normal…", len(links))
+			} else {
+				m.toast = "moving…"
+			}
+			return m, moveTasksGroupedCmd(m.client, pending, links, dest.id, dest.name)
 		case pickerMoveList:
 			if m.listPickerListRef == "" {
 				m.errMsg = "select a list to move"
@@ -216,7 +226,67 @@ func (m model) updateListPicker(msg tea.KeyMsg) (model, tea.Cmd) {
 	return m, nil
 }
 
-func moveTasksGroupedCmd(c *ticktick.Client, tasks []ticktick.Task, destProjectID, destName string) tea.Cmd {
+func (m model) parentChildLinks(parent ticktick.Task) []ticktick.TaskParentLink {
+	if parent.ID == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []ticktick.TaskParentLink
+	add := func(id string) {
+		if id == "" || id == parent.ID || seen[id] {
+			return
+		}
+		seen[id] = true
+		out = append(out, ticktick.TaskParentLink{TaskID: id, OldParentID: parent.ID})
+	}
+	for _, id := range parent.ChildIDs {
+		add(id)
+	}
+	for _, task := range m.tasks {
+		if task.ParentID == parent.ID {
+			add(task.ID)
+		}
+	}
+	return out
+}
+
+func (m model) linksToMakeNormal() []ticktick.TaskParentLink {
+	if task, ok := m.selectedTask(); ok {
+		if links := m.parentChildLinks(task); len(links) > 0 {
+			return links
+		}
+	}
+	return m.subtaskParentLinks(m.tasksToMove())
+}
+
+func makeTasksNormalCmd(c *ticktick.Client, links []ticktick.TaskParentLink) tea.Cmd {
+	return func() tea.Msg {
+		if c == nil {
+			return taskMovedMsg{err: fmt.Errorf("not connected")}
+		}
+		n, err := c.MakeTasksNormal(links)
+		return taskMovedMsg{madeNormal: n, err: err}
+	}
+}
+
+func (m model) subtaskParentLinks(tasks []ticktick.Task) []ticktick.TaskParentLink {
+	var out []ticktick.TaskParentLink
+	seen := map[string]bool{}
+	for _, task := range tasks {
+		if task.ID == "" || seen[task.ID] {
+			continue
+		}
+		parentID, _ := m.listingParent(task)
+		if parentID == "" || parentID == task.ID {
+			continue
+		}
+		seen[task.ID] = true
+		out = append(out, ticktick.TaskParentLink{TaskID: task.ID, OldParentID: parentID})
+	}
+	return out
+}
+
+func moveTasksGroupedCmd(c *ticktick.Client, tasks []ticktick.Task, links []ticktick.TaskParentLink, destProjectID, destName string) tea.Cmd {
 	return func() tea.Msg {
 		if c == nil {
 			return taskMovedMsg{destID: destProjectID, destName: destName, err: fmt.Errorf("not connected")}
@@ -245,15 +315,20 @@ func moveTasksGroupedCmd(c *ticktick.Client, tasks []ticktick.Task, destProjectI
 		if len(movedTasks) == 0 {
 			msg.nextUndo = nil
 		}
-		if moved == 0 && lastErr != nil {
-			sessionlog.Appendf("task_move_fail", "to=%s err=%v", destName, lastErr)
-			return msg
-		}
 		if lastErr != nil {
 			sessionlog.Appendf("task_move_fail", "moved=%d to=%s err=%v", moved, destName, lastErr)
 			return msg
 		}
-		sessionlog.Appendf("task_move_ok", "count=%d to=%s", moved, destName)
+		if len(links) > 0 {
+			n, err := c.MakeTasksNormal(links)
+			msg.madeNormal = n
+			if err != nil {
+				msg.err = err
+				sessionlog.Appendf("task_move_fail", "moved=%d normal=%d to=%s err=%v", moved, n, destName, err)
+				return msg
+			}
+		}
+		sessionlog.Appendf("task_move_ok", "count=%d normal=%d to=%s", moved, msg.madeNormal, destName)
 		return msg
 	}
 }
@@ -347,6 +422,191 @@ func moveListCmd(c *ticktick.Client, listRef, folder string) tea.Cmd {
 	return func() tea.Msg {
 		err := c.MoveProject(listRef, folder)
 		return listMovedMsg{folder: folder, err: err}
+	}
+}
+
+func (m model) beginReorder() (model, tea.Cmd) {
+	row, ok := m.currentListRowForRename()
+	if !ok || (row.node.Kind == "folder" && row.node.ID == "") {
+		m.errMsg = "select a list or folder"
+		return m, nil
+	}
+	if row.node.Kind == "list" && row.node.ID == m.inboxID {
+		m.errMsg = "inbox stays at the top"
+		return m, nil
+	}
+	if row.node.Kind == "list" && !listKnown(m.projects, row.node.ID) {
+		m.errMsg = "refresh the lists and try again"
+		return m, nil
+	}
+	if row.node.Kind == "folder" && !groupKnown(m.groups, row.node.ID) {
+		m.errMsg = "refresh the lists and try again"
+		return m, nil
+	}
+	m.reorderKind = row.node.Kind
+	m.reorderID = row.node.ID
+	m.reorderName = row.node.Name
+	m.reorderProjects = append([]ticktick.Project(nil), m.projects...)
+	m.reorderGroups = append([]ticktick.ProjectGroup(nil), m.groups...)
+	m.mode = modeReorderList
+	m.toast = "moving " + row.node.Name
+	return m, nil
+}
+
+func (m model) updateReorderList(msg tea.KeyMsg) (model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "q":
+		return m, tea.Quit
+	case "?":
+		m.showHelp = true
+		m.helpCursor = 0
+		m.helpFilter = ""
+		return m, nil
+	case "esc":
+		m.projects = m.reorderProjects
+		m.groups = m.reorderGroups
+		m.rebuildSidebar()
+		m.selectListByID(m.reorderID)
+		m.clearReorder()
+		m.toast = "cancelled"
+		return m, nil
+	case "enter":
+		return m.commitReorder()
+	case "j", "down":
+		m.stepReorder(1)
+		return m, nil
+	case "k", "up":
+		m.stepReorder(-1)
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m *model) stepReorder(dir int) {
+	edge := "already last"
+	if dir < 0 {
+		edge = "already first"
+	}
+	if m.reorderKind == "folder" {
+		place := ticktick.MoveFolderStep(m.groups, m.reorderID, dir)
+		if !place.Active() {
+			m.toast = edge
+			return
+		}
+		m.applyGroupPlacement(place)
+		m.toast = "moving " + m.reorderName
+		return
+	}
+	place := ticktick.MoveListVisual(m.projects, m.groups, m.reorderID, dir)
+	if !place.Active() {
+		m.toast = edge
+		return
+	}
+	m.applyProjectPlacement(place)
+	m.toast = "moving " + m.reorderName
+}
+
+func (m model) commitReorder() (model, tea.Cmd) {
+	kind := m.reorderKind
+	id := m.reorderID
+	if kind == "folder" {
+		place := ticktick.PlacementFromGroups(m.reorderGroups, m.groups, id)
+		m.clearReorder()
+		if !place.Active() {
+			m.toast = "order unchanged"
+			return m, nil
+		}
+		m.toast = "saving…"
+		return m, applyGroupOrdersCmd(m.client, place)
+	}
+	place := ticktick.PlacementFromProjects(m.reorderProjects, m.projects, id)
+	m.clearReorder()
+	if !place.Active() {
+		m.toast = "order unchanged"
+		return m, nil
+	}
+	m.toast = "saving…"
+	return m, applyProjectOrdersCmd(m.client, place)
+}
+
+func (m *model) clearReorder() {
+	m.mode = modeNormal
+	m.reorderKind = ""
+	m.reorderID = ""
+	m.reorderName = ""
+	m.reorderProjects = nil
+	m.reorderGroups = nil
+}
+
+func groupKnown(groups []ticktick.ProjectGroup, id string) bool {
+	for _, group := range groups {
+		if group.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func listKnown(projects []ticktick.Project, id string) bool {
+	for _, project := range projects {
+		if project.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *model) rebuildSidebar() {
+	m.tree = ticktick.ProjectTreeWithInbox(m.inboxID, m.groups, m.projects)
+	m.listRows = buildListRows(m.tree)
+}
+
+func (m *model) applyProjectPlacement(place ticktick.ProjectPlacement) {
+	if !place.Active() {
+		return
+	}
+	for i := range m.projects {
+		if order, ok := place.Orders[m.projects[i].ID]; ok {
+			m.projects[i].SortOrder = order
+		}
+		if place.SetGroup && m.projects[i].ID == place.MovedID {
+			m.projects[i].GroupID = place.GroupID
+		}
+	}
+	m.rebuildSidebar()
+	m.selectListByID(place.MovedID)
+}
+
+func (m *model) applyGroupPlacement(place ticktick.GroupPlacement) {
+	if !place.Active() {
+		return
+	}
+	for i := range m.groups {
+		if order, ok := place.Orders[m.groups[i].ID]; ok {
+			m.groups[i].SortOrder = order
+		}
+	}
+	m.rebuildSidebar()
+	m.selectListByID(place.MovedID)
+}
+
+func applyProjectOrdersCmd(c *ticktick.Client, place ticktick.ProjectPlacement) tea.Cmd {
+	return func() tea.Msg {
+		if c == nil {
+			return listMovedMsg{what: "list", err: fmt.Errorf("not connected")}
+		}
+		err := c.ApplyProjectOrders(place)
+		return listMovedMsg{what: "list", err: err}
+	}
+}
+
+func applyGroupOrdersCmd(c *ticktick.Client, place ticktick.GroupPlacement) tea.Cmd {
+	return func() tea.Msg {
+		if c == nil {
+			return listMovedMsg{what: "folder", err: fmt.Errorf("not connected")}
+		}
+		err := c.ApplyGroupOrders(place)
+		return listMovedMsg{what: "folder", err: err}
 	}
 }
 

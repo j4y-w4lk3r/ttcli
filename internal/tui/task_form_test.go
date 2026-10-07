@@ -246,6 +246,35 @@ func TestEditSubtaskCanBecomeANormalTask(t *testing.T) {
 	}
 }
 
+func TestEditListedChildOffersANormalTask(t *testing.T) {
+	m := fixtureModel(120, 40)
+	m.tasks = []ticktick.Task{
+		{ID: "fm0", Title: "fm0", ChildIDs: []string{"fm3"}},
+		{ID: "fm3", Title: "fm3", ProjectID: "fm"},
+	}
+	m.openEditTaskForm(m.tasks[1])
+	if m.editTaskParentID != "fm0" {
+		t.Fatalf("parent=%q", m.editTaskParentID)
+	}
+	if !strings.Contains(m.renderAddTaskForm(100, 80), "subtask of fm0") {
+		t.Fatal("edit form should show the listing parent")
+	}
+}
+
+func TestEditCompletedTaskUsesItsOwnList(t *testing.T) {
+	m := fixtureModel(120, 40)
+	m.projectID = allTasksID
+	m.openEditTaskForm(ticktick.Task{
+		ID: "done", ProjectID: "0123456789abcdef01234567", Title: "Finished", Status: 2,
+	})
+	if m.editProjectRef() != "0123456789abcdef01234567" {
+		t.Fatalf("project=%q", m.editProjectRef())
+	}
+	if m.taskTitleInput.Value() != "Finished" {
+		t.Fatalf("title=%q", m.taskTitleInput.Value())
+	}
+}
+
 func TestNormalTaskHidesTheParentField(t *testing.T) {
 	m := fixtureModel(120, 40)
 	m.openEditTaskForm(ticktick.Task{ID: "1", Title: "fm0"})

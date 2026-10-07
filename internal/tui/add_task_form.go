@@ -125,6 +125,7 @@ func (m *model) openEditTaskForm(t ticktick.Task) {
 	m.mode = modeEditTask
 	m.editTaskID = t.ID
 	m.resetTaskFormFields()
+	m.editTaskProjectID = t.ProjectID
 	m.taskTitleInput.SetValue(t.Title)
 	m.taskTitleInput.Placeholder = ""
 	m.taskTitleInput.CursorEnd()
@@ -154,8 +155,7 @@ func (m *model) openEditTaskForm(t ticktick.Task) {
 	}
 	m.addTaskRepeatIdx = repeatOptionIndex(t.RepeatFlag)
 	m.addTaskRepeatFromIdx = repeatFromOptionIndex(t.RepeatFrom.Int())
-	m.editTaskParentID = t.ParentID
-	m.editTaskParentTitle = m.taskTitleByID(t.ParentID)
+	m.editTaskParentID, m.editTaskParentTitle = m.listingParent(t)
 	m.editTaskParentIdx = 0
 	if addTaskRepeatOpts[m.addTaskRepeatIdx] == "custom" {
 		m.addTaskRepeatInput.SetValue(t.RepeatFlag)
@@ -171,6 +171,7 @@ func (m *model) resetTaskFormFields() {
 	m.addTaskPriorityIdx = 0
 	m.addTaskRepeatIdx = 0
 	m.addTaskRepeatFromIdx = 0
+	m.editTaskProjectID = ""
 	m.editTaskParentID = ""
 	m.editTaskParentTitle = ""
 	m.editTaskParentIdx = 0
@@ -290,6 +291,28 @@ func (m model) taskFormFieldVisible(field int) bool {
 	default:
 		return true
 	}
+}
+
+// listingParent is the task this one is nested under. The child can omit its
+// parent id while the parent still lists it.
+func (m model) listingParent(task ticktick.Task) (string, string) {
+	if task.ParentID != "" {
+		return task.ParentID, m.taskTitleByID(task.ParentID)
+	}
+	if task.ID == "" {
+		return "", ""
+	}
+	for _, other := range m.tasks {
+		if other.ID == "" || other.ID == task.ID {
+			continue
+		}
+		for _, childID := range other.ChildIDs {
+			if childID == task.ID {
+				return other.ID, other.Title
+			}
+		}
+	}
+	return "", ""
 }
 
 func (m model) taskTitleByID(id string) string {
@@ -480,9 +503,10 @@ func (m model) submitTaskForm() (model, tea.Cmd) {
 			return m, nil
 		}
 		return m, updateTaskCmd(
-			m.client, m.editTaskID, m.projectID, title, notes, priority,
+			m.client, m.editTaskID, m.editProjectRef(), title, notes, priority,
 			sched, clearDue, recurrence, clearRecurrence, focusPlan,
 			m.editTaskParentID != "" && m.editTaskParentIdx != 0,
+			m.editTaskParentID,
 		)
 	}
 	if m.projectID == "" {
@@ -709,6 +733,14 @@ func (m model) parseTaskRecurrence(schedule *ticktick.TaskSchedule) (*ticktick.T
 	return recurrence, false, nil
 }
 
+// editProjectRef is the task's own list. The All view's project id is not a list.
+func (m model) editProjectRef() string {
+	if id := strings.TrimSpace(m.editTaskProjectID); id != "" {
+		return id
+	}
+	return m.projectID
+}
+
 func updateTaskCmd(
 	c *ticktick.Client,
 	taskID, projectID, title, content string,
@@ -719,6 +751,7 @@ func updateTaskCmd(
 	clearRecurrence bool,
 	focusPlan *ticktick.TaskFocusPlan,
 	clearParent bool,
+	oldParentID string,
 ) tea.Cmd {
 	return func() tea.Msg {
 		in := ticktick.TaskUpdateInput{
@@ -731,9 +764,10 @@ func updateTaskCmd(
 			ClearRecurrence: clearRecurrence,
 			FocusPlan:       focusPlan,
 			ClearParent:     clearParent,
+			OldParentID:     oldParentID,
 		}
 		err := c.UpdateTask(taskID, projectID, in)
-		return taskUpdatedMsg{title: title, err: err}
+		return taskUpdatedMsg{title: title, projectID: projectID, err: err}
 	}
 }
 

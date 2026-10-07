@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/j4y-w4lk3r/ttcli/internal/taskarchive"
 	"github.com/j4y-w4lk3r/ttcli/internal/ticktick"
 )
@@ -49,7 +50,7 @@ func (m model) archiveTaskRows() []taskListRow {
 	filter := m.filterInput.Value()
 	rows := make([]taskListRow, 0, len(m.archiveRecords))
 	for _, record := range m.archiveRecords {
-		if m.projectID != "" && record.Task.ProjectID != m.projectID {
+		if m.projectID != "" && m.projectID != allTasksID && record.Task.ProjectID != m.projectID {
 			continue
 		}
 		task := record.Task
@@ -79,14 +80,28 @@ func (m model) archiveRecordForTaskID(taskID string) (taskarchive.Record, bool) 
 	return taskarchive.Record{}, false
 }
 
-func (m model) taskScopeStats() (total, matching, shown int) {
-	scope := m.effectiveTaskScope()
-	if isSmartList(m.projectID) || m.showsTaskListName() {
-		scope = TaskScopeAll
+// taskListScope is the scope used to draw the current list. Smart lists and
+// folders keep their own feed. The All list follows the scope selected with c.
+func (m model) taskListScope() TaskScope {
+	if isSmartList(m.projectID) || (m.showsTaskListName() && m.projectID != allTasksID) {
+		return TaskScopeAll
 	}
+	return m.effectiveTaskScope()
+}
+
+func (m model) reloadAllForScope() (model, tea.Cmd) {
+	if m.projectID != allTasksID || m.effectiveTaskScope() == TaskScopeArchive {
+		return m, nil
+	}
+	m.loading = true
+	return m, m.reloadCurrentTasks(false)
+}
+
+func (m model) taskScopeStats() (total, matching, shown int) {
+	scope := m.taskListScope()
 	if scope == TaskScopeArchive {
 		for _, record := range m.archiveRecords {
-			if m.projectID != "" && record.Task.ProjectID != m.projectID {
+			if m.projectID != "" && m.projectID != allTasksID && record.Task.ProjectID != m.projectID {
 				continue
 			}
 			total++

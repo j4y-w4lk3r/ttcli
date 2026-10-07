@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -199,6 +200,93 @@ func (c *Client) DeleteProject(projectRef string) error {
 	}
 	b, _ := json.Marshal(map[string]any{"delete": []string{pid}})
 	_, err = c.do(http.MethodPost, "/api/v2/batch/project", b)
+	return err
+}
+
+// ApplyProjectOrders writes sidebar positions. TickTick stores that order on
+// each list as sortOrder, and the folder as groupId.
+func (c *Client) ApplyProjectOrders(place ProjectPlacement) error {
+	if !place.Active() {
+		return fmt.Errorf("nothing to reorder")
+	}
+	raw, err := c.GetRaw("/api/v2/projects")
+	if err != nil {
+		return err
+	}
+	var all []map[string]any
+	if err := json.Unmarshal(raw, &all); err != nil {
+		return err
+	}
+	byID := make(map[string]map[string]any, len(all))
+	for _, item := range all {
+		id, _ := item["id"].(string)
+		if id != "" {
+			byID[id] = item
+		}
+	}
+	ids := make([]string, 0, len(place.Orders))
+	for id := range place.Orders {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	update := make([]any, 0, len(ids))
+	for _, id := range ids {
+		item, ok := byID[id]
+		if !ok {
+			return fmt.Errorf("list %s not found", id)
+		}
+		item["sortOrder"] = place.Orders[id]
+		if place.SetGroup && id == place.MovedID {
+			item["groupId"] = place.GroupID
+		}
+		update = append(update, item)
+	}
+	payload := batchProjectPayload{Update: update, Add: []any{}, Delete: []string{}}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = c.do(http.MethodPost, "/api/v2/batch/project", b)
+	return err
+}
+
+// ApplyGroupOrders writes folder sidebar positions.
+func (c *Client) ApplyGroupOrders(place GroupPlacement) error {
+	if !place.Active() {
+		return fmt.Errorf("nothing to reorder")
+	}
+	groups, err := c.ListProjectGroups()
+	if err != nil {
+		return err
+	}
+	byID := make(map[string]ProjectGroup, len(groups))
+	for _, group := range groups {
+		byID[group.ID] = group
+	}
+	ids := make([]string, 0, len(place.Orders))
+	for id := range place.Orders {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	update := make([]any, 0, len(ids))
+	for _, id := range ids {
+		group, ok := byID[id]
+		if !ok {
+			return fmt.Errorf("folder %s not found", id)
+		}
+		update = append(update, map[string]any{
+			"id":        group.ID,
+			"name":      group.Name,
+			"sortOrder": place.Orders[id],
+			"list_type": "group",
+		})
+	}
+	payload := batchProjectGroupPayload{Update: update, Add: []any{}, Delete: []string{}}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = c.do(http.MethodPost, "/api/v2/batch/projectGroup", b)
 	return err
 }
 

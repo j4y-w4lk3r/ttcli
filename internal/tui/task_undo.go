@@ -76,7 +76,7 @@ func (m model) runTaskUndo(undo *taskUndo) tea.Cmd {
 	case undoMoveBack:
 		return moveTasksBackCmd(m.client, undo.tasks, undo.fromProject, m.undoMoveDestName(undo.tasks), undo.destName)
 	case undoMoveTo:
-		return moveTasksGroupedCmd(m.client, undo.tasks, undo.toProject, undo.destName)
+		return moveTasksGroupedCmd(m.client, undo.tasks, nil, undo.toProject, undo.destName)
 	default:
 		return nil
 	}

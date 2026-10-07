@@ -44,7 +44,7 @@ func (c *Client) MoveTasks(taskIDs []string, fromProjectRef, destProjectRef stri
 	if fromPID == toPID {
 		return len(taskIDs), nil
 	}
-	var reopen, recomplete []string
+	var reopenCompleted, reopenAbandoned, recomplete, reabandon []string
 	items := make([]map[string]string, 0, len(taskIDs))
 	for _, id := range taskIDs {
 		task, err := c.findTaskRawByID(id, fromPID)
@@ -54,10 +54,10 @@ func (c *Client) MoveTasks(taskIDs []string, fromProjectRef, destProjectRef stri
 		switch taskMapStatus(task) {
 		case 2:
 			recomplete = append(recomplete, id)
-			reopen = append(reopen, id)
-		case 0:
-		default:
-			reopen = append(reopen, id)
+			reopenCompleted = append(reopenCompleted, id)
+		case -1:
+			reabandon = append(reabandon, id)
+			reopenAbandoned = append(reopenAbandoned, id)
 		}
 		items = append(items, map[string]string{
 			"taskId":        id,
@@ -65,8 +65,13 @@ func (c *Client) MoveTasks(taskIDs []string, fromProjectRef, destProjectRef stri
 			"toProjectId":   toPID,
 		})
 	}
-	if len(reopen) > 0 {
-		if err := c.ReopenTasks(fromPID, reopen); err != nil {
+	if len(reopenAbandoned) > 0 {
+		if err := c.ReopenAbandonedTasks(fromPID, reopenAbandoned); err != nil {
+			return 0, err
+		}
+	}
+	if len(reopenCompleted) > 0 {
+		if err := c.ReopenTasks(fromPID, reopenCompleted); err != nil {
 			return 0, err
 		}
 	}
@@ -92,6 +97,11 @@ func (c *Client) MoveTasks(taskIDs []string, fromProjectRef, destProjectRef stri
 			return len(taskIDs), fmt.Errorf("moved tasks but could not mark completed: %w", err)
 		}
 	}
+	if len(reabandon) > 0 {
+		if err := c.AbandonTasks(toPID, reabandon); err != nil {
+			return len(taskIDs), fmt.Errorf("moved tasks but could not mark won't do: %w", err)
+		}
+	}
 	return len(taskIDs), nil
 }
 
@@ -112,8 +122,14 @@ func (c *Client) moveTaskMap(task map[string]any, fromProjectRef, destProjectRef
 		return MoveResult{NewTaskID: taskID, PreviousID: taskID}, nil
 	}
 
-	wasCompleted := taskMapStatus(task) == 2
-	if taskMapStatus(task) != 0 {
+	status := taskMapStatus(task)
+	wasCompleted := status == 2
+	wasAbandoned := status == -1
+	if wasAbandoned {
+		if err := c.ReopenAbandonedTasks(fromPID, []string{taskID}); err != nil {
+			return MoveResult{}, fmt.Errorf("reopen won't do task: %w", err)
+		}
+	} else if status != 0 {
 		if err := c.ReopenTask(fromPID, taskID); err != nil {
 			return MoveResult{}, fmt.Errorf("reopen completed task: %w", err)
 		}
@@ -150,6 +166,12 @@ func (c *Client) moveTaskMap(task map[string]any, fromProjectRef, destProjectRef
 		if err := c.CompleteTask(toPID, taskID); err != nil {
 			return MoveResult{NewTaskID: taskID, PreviousID: taskID},
 				fmt.Errorf("moved task but could not mark completed: %w", err)
+		}
+	}
+	if wasAbandoned {
+		if err := c.AbandonTasks(toPID, []string{taskID}); err != nil {
+			return MoveResult{NewTaskID: taskID, PreviousID: taskID},
+				fmt.Errorf("moved task but could not mark won't do: %w", err)
 		}
 	}
 

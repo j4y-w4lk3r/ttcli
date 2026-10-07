@@ -105,6 +105,56 @@ func TestMoveTasksPostsOneBatch(t *testing.T) {
 	}
 }
 
+func TestMoveTasksKeepsAWontDoTaskThatTheListFeedOmits(t *testing.T) {
+	const fromID = "inboxfixture"
+	const toID = "0123456789abcdef01234567"
+	const taskID = "111111111111111111111111"
+	moved := false
+	var restoredStatus float64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/task/"+taskID && r.URL.RawQuery == "":
+			_, _ = w.Write([]byte(`{"id":"` + taskID + `","projectId":"` + fromID + `","title":"Purchase","status":-1}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/batch/task":
+			var payload struct {
+				Update []map[string]any `json:"update"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if len(payload.Update) == 1 {
+				if status, ok := payload.Update[0]["status"].(float64); ok {
+					restoredStatus = status
+				}
+			}
+			_, _ = w.Write([]byte(`{}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/batch/taskProject":
+			moved = true
+			_, _ = w.Write([]byte(`{"id2etag":{},"id2error":{}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/project/"+fromID+"/tasks":
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/project/"+toID+"/tasks":
+			if !moved {
+				_, _ = w.Write([]byte(`[]`))
+				return
+			}
+			_, _ = w.Write([]byte(`[{"id":"` + taskID + `","projectId":"` + toID + `","title":"Purchase","status":0}]`))
+		default:
+			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client := repositoryTestClient(server)
+	n, err := client.MoveTasks([]string{taskID}, fromID, toID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || !moved || restoredStatus != -1 {
+		t.Fatalf("n=%d moved=%v status=%v", n, moved, restoredStatus)
+	}
+}
+
 func TestMoveTaskRejectsASilentNoOp(t *testing.T) {
 	const fromID = "0123456789abcdef01234567"
 	const toID = "abcdef0123456789abcdef01"

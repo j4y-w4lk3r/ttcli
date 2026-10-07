@@ -36,6 +36,23 @@ func TestWontDoKeyReopensAnAbandonedTask(t *testing.T) {
 	}
 }
 
+func TestEnterOnAWontDoTaskReopensIt(t *testing.T) {
+	m := fixtureModel(100, 30)
+	m.paneFocus = paneTasks
+	m.taskScope = TaskScopeAll
+	m.tasks = []ticktick.Task{{ID: "later", Title: "Purchase", Status: -1, ProjectID: "inboxfixture"}}
+	m.taskCursor = 0
+	_, cmd := m.updateTasksKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter should reopen a won't-do task")
+	}
+	msg := cmd()
+	reopened, ok := msg.(taskReopenedMsg)
+	if !ok || reopened.err == nil {
+		t.Fatalf("msg=%#v", msg)
+	}
+}
+
 func TestWontDoKeyIgnoresTheListsPane(t *testing.T) {
 	m := fixtureModel(100, 30)
 	m.paneFocus = paneLists

@@ -84,7 +84,7 @@ func TestLargeTrashListScrollReusesTheBuiltRows(t *testing.T) {
 		tasks[i] = ticktick.Task{ID: fmt.Sprintf("bin-%d", i), Title: "trashed item", Deleted: 1}
 	}
 	start := time.Now()
-	rows := buildVisibleTaskRowsForScope(tasks, TaskSortCustom, TaskScopeAll, "")
+	rows := buildVisibleTaskRowsForScope(tasks, TaskSortCustom, TaskScopeAll, "", nil)
 	if elapsed := time.Since(start); elapsed > 150*time.Millisecond {
 		t.Fatalf("building %d trash rows took %s", n, elapsed)
 	}

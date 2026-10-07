@@ -8,12 +8,23 @@ import (
 )
 
 func sortTasks(tasks []ticktick.Task, mode TaskSortMode) {
+	sortTasksNamed(tasks, mode, nil)
+}
+
+func sortTasksNamed(tasks []ticktick.Task, mode TaskSortMode, listName func(string) string) {
 	sort.Slice(tasks, func(i, j int) bool {
-		return compareTasks(tasks[i], tasks[j], mode)
+		return compareTasksNamed(tasks[i], tasks[j], mode, listName)
 	})
 }
 
 func compareTasks(a, b ticktick.Task, mode TaskSortMode) bool {
+	return compareTasksNamed(a, b, mode, nil)
+}
+
+func compareTasksNamed(a, b ticktick.Task, mode TaskSortMode, listName func(string) string) bool {
+	if mode == TaskSortList {
+		return compareTasksByList(a, b, listName)
+	}
 	da, db := a.Done(), b.Done()
 	if da != db {
 		return !da
@@ -31,6 +42,28 @@ func compareTasks(a, b ticktick.Task, mode TaskSortMode) bool {
 		}
 		return strings.ToLower(a.Title) < strings.ToLower(b.Title)
 	}
+}
+
+func compareTasksByList(a, b ticktick.Task, listName func(string) string) bool {
+	la, lb := listSortName(a, listName), listSortName(b, listName)
+	if la != lb {
+		return la < lb
+	}
+	if a.Done() != b.Done() {
+		return !a.Done()
+	}
+	return compareTasksByTitle(a, b)
+}
+
+func listSortName(task ticktick.Task, listName func(string) string) string {
+	name := ""
+	if listName != nil {
+		name = strings.TrimSpace(listName(task.ProjectID))
+	}
+	if name == "" {
+		name = task.ProjectID
+	}
+	return strings.ToLower(name)
 }
 
 func compareTasksByPriority(a, b ticktick.Task) bool {
