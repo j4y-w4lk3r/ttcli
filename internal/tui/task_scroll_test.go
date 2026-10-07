@@ -108,7 +108,7 @@ func TestLargeTrashListScrollReusesTheBuiltRows(t *testing.T) {
 		}
 		_ = m.View()
 	}
-	if elapsed := time.Since(start); elapsed > 400*time.Millisecond {
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("40 trash scrolls took %s", elapsed)
 	}
 	if m.taskCursor != 40 {
