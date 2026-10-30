@@ -78,8 +78,9 @@ func TestPlanningSettingsDefaultsAndValidation(t *testing.T) {
 	settings.WeekStartsOn = "nonsense"
 	settings.TaskScope = "unknown"
 	settings.CalendarWeekDensity = "unknown"
-	settings.PomoFocusDesign = "unknown"
-	settings.PomoDailyGoal = 1000
+		settings.PomoFocusDesign = "unknown"
+		settings.PomoLogDesign = "unknown"
+		settings.PomoDailyGoal = 1000
 	settings.applyPlanningDefaults()
 	settings.applyPomoDefaults()
 	if settings.WorkStart != "09:00" || settings.WorkEnd != "18:00" ||
@@ -87,6 +88,7 @@ func TestPlanningSettingsDefaultsAndValidation(t *testing.T) {
 		settings.WeekStartsOn != "monday" || settings.TaskScope != TaskScopeOpen ||
 		settings.calendarWeekDensity() != PomoDensityStretch ||
 		settings.PomoFocusDesign != PomoFocusArc ||
+		settings.PomoLogDesign != PomoLogRails ||
 		settings.PomoDailyGoal != dailyPomoGoal {
 		t.Fatalf("validated settings=%+v", settings)
 	}

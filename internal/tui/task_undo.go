@@ -14,6 +14,7 @@ const (
 	undoTrash           = "trash"
 	undoMoveBack        = "move-back"
 	undoMoveTo          = "move-to"
+	undoDue             = "due"
 )
 
 // taskUndo is the single step u can reverse in the tasks pane.
@@ -77,6 +78,8 @@ func (m model) runTaskUndo(undo *taskUndo) tea.Cmd {
 		return moveTasksBackCmd(m.client, undo.tasks, undo.fromProject, m.undoMoveDestName(undo.tasks), undo.destName)
 	case undoMoveTo:
 		return moveTasksGroupedCmd(m.client, undo.tasks, nil, undo.toProject, undo.destName)
+	case undoDue:
+		return restoreDueCmd(m.client, undo.tasks)
 	default:
 		return nil
 	}

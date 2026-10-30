@@ -34,29 +34,66 @@ func renderPauseTimelineTitle(taskTitle string, selected bool) string {
 	if selected {
 		taskSt = pauseTaskStyle.Copy().Bold(true)
 	}
-	return renderPauseMark() + " " + taskSt.Render(title)
+	return taskSt.Render(title)
 }
 
-func formatPausePomoEndTime(endClock string) string {
-	if endClock == "" {
-		return padCellLeft("", pomoEndColW)
+// pauseTimelineClock shows seconds when the pause starts and ends in the same minute.
+func pauseTimelineClock(spell focus.PauseSpell) string {
+	if spell.Start.IsZero() {
+		return ""
 	}
-	label := pauseLabelStyle.Render("──▶ ") + pauseLabelStyle.Copy().Bold(true).Render(endClock)
-	return padCellLeft(label, pomoEndColW)
+	start := spell.Start.Local()
+	if spell.End.IsZero() {
+		return start.Format("15:04:05")
+	}
+	end := spell.End.Local()
+	if start.Format("15:04") == end.Format("15:04") {
+		return start.Format("15:04:05")
+	}
+	return start.Format("15:04") + "–" + end.Format("15:04")
 }
 
-const pomoPauseBreakdownColW = 30
-
-func formatPausePomoSuffixColumns(endClock string, spell focus.PauseSpell, now time.Time, selected bool) string {
-	endPart := formatPausePomoEndTime(endClock)
-	pauseMins := int(spell.Duration(now).Minutes() + 0.5)
-	barPart := padCellLeft(pauseDurationBarOnly(pauseMins, selected), pomoBarColW)
-	breakdown := formatPauseWorkBreakdown(spell, now)
-	if breakdown == "" {
-		breakdown = fmt.Sprintf("%dm", pauseMins)
+func pauseTimelineLength(d time.Duration) string {
+	if d < 0 {
+		d = 0
 	}
-	durPart := padCellRight(pauseBreakdownBadge(breakdown, selected), pomoPauseBreakdownColW)
-	return endPart + barPart + durPart
+	d = d.Round(time.Second)
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	return formatPauseSliceDuration(d)
+}
+
+func pauseTimelineContext(spell focus.PauseSpell) string {
+	var parts []string
+	if spell.WorkBefore >= 30*time.Second {
+		parts = append(parts, formatPauseSliceDuration(spell.WorkBefore)+" before")
+	}
+	if spell.WorkAfter >= 30*time.Second {
+		parts = append(parts, formatPauseSliceDuration(spell.WorkAfter)+" after")
+	}
+	return strings.Join(parts, " · ")
+}
+
+func formatPauseTimelineSuffix(spell focus.PauseSpell, now time.Time, selected bool) string {
+	length := pauseTimelineLength(spell.Duration(now))
+	label := length
+	if spell.End.IsZero() {
+		label = length + " · still paused"
+	}
+	st := pauseLabelStyle
+	if selected {
+		st = pauseLabelStyle.Copy().Bold(true)
+	}
+	suffix := st.Render(label)
+	if ctx := pauseTimelineContext(spell); ctx != "" {
+		ctxSt := pauseTaskStyle
+		if selected {
+			ctxSt = pauseTaskStyle.Copy().Bold(true)
+		}
+		suffix += "  " + ctxSt.Render(ctx)
+	}
+	return suffix
 }
 
 func formatPauseWorkBreakdown(spell focus.PauseSpell, now time.Time) string {
@@ -85,14 +122,6 @@ func formatPauseSliceDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm", m)
 }
 
-func pauseBreakdownBadge(text string, selected bool) string {
-	st := pauseLabelStyle
-	if selected {
-		st = pauseLabelStyle.Copy().Bold(true)
-	}
-	return st.Render(text)
-}
-
 func pauseDurationBadge(mins int, selected bool) string {
 	if mins < 1 {
 		mins = 1
@@ -102,8 +131,4 @@ func pauseDurationBadge(mins int, selected bool) string {
 		st = lipgloss.NewStyle().Foreground(colorBase).Background(colorBlue).Bold(true).Padding(0, 1)
 	}
 	return st.Render(fmt.Sprintf("%dm", mins))
-}
-
-func pauseDurationBarOnly(mins int, selected bool) string {
-	return pomoDurationBarStyled(mins, pomoSessionPause, colorBlue, selected)
 }

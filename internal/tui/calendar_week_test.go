@@ -187,6 +187,42 @@ func TestWeekSelectedTaskCanCheckIn(t *testing.T) {
 	}
 }
 
+func TestCalWeekCollapsesAllDayPilesToACount(t *testing.T) {
+	start := time.Date(2026, 10, 5, 0, 0, 0, 0, time.Local)
+	thursday := start.AddDate(0, 0, 3)
+	tasks := []ticktick.Task{{
+		ID: "nails", Title: "nails", DueDate: dateKey(start.AddDate(0, 0, 1)), IsAllDay: true,
+	}}
+	for i := 0; i < 8; i++ {
+		tasks = append(tasks, ticktick.Task{
+			ID: fmt.Sprintf("pile-%d", i), Title: fmt.Sprintf("pile %d", i),
+			DueDate: dateKey(thursday), IsAllDay: true,
+		})
+	}
+	m := fixtureModel(220, 40)
+	m.view, m.calMode, m.calDate = viewCalendar, calModeWeek, thursday
+	m.calTasks = tasks
+	output := stripANSI(m.renderCalWeekTimeline(m.calIdx(), m.layout()))
+	if !strings.Contains(output, "nails") || !strings.Contains(output, "8 tasks") {
+		t.Fatalf("expected the single task and a count:\n%s", output)
+	}
+	if strings.Contains(output, "pile 3") {
+		t.Fatalf("collapsed titles are still listed:\n%s", output)
+	}
+
+	rows := m.calWeekRows(m.calIdx())
+	for i, row := range rows {
+		if row.kind == "allday" && row.entry.Task.ID == "pile-3" {
+			m.calGridCursor = i
+			break
+		}
+	}
+	focused := stripANSI(m.renderCalWeekTimeline(m.calIdx(), m.layout()))
+	if !strings.Contains(focused, "pile 3") || !strings.Contains(focused, "+7 more") || !strings.Contains(focused, "nails") {
+		t.Fatalf("selected pile task:\n%s", focused)
+	}
+}
+
 func TestNarrowWeekCardsShowTopTasksAndMore(t *testing.T) {
 	today := dateOnly(time.Now())
 	var tasks []ticktick.Task

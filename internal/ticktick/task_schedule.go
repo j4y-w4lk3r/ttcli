@@ -73,6 +73,7 @@ type TaskUpdateInput struct {
 	FocusPlan       *TaskFocusPlan
 	ClearParent     bool
 	OldParentID     string
+	ParentID        string
 }
 
 // UpdateTask updates task fields and due date / reminder / duration.
@@ -103,6 +104,9 @@ func (c *Client) UpdateTask(taskID, projectRef string, in TaskUpdateInput) error
 	}
 	if clearParent {
 		return c.clearTaskParent(task, in.OldParentID)
+	}
+	if parentID := strings.TrimSpace(in.ParentID); parentID != "" && parentID != in.OldParentID {
+		return c.setTaskParent(task, parentID, in.OldParentID)
 	}
 	return nil
 }
@@ -338,6 +342,51 @@ func (c *Client) DropMissingChildIDs(parentID string, childIDs []string) error {
 		if seen[id] {
 			return fmt.Errorf("parent still lists %s", id)
 		}
+	}
+	return nil
+}
+
+// setTaskParent nests a task under a parent in the same list. TickTick ignores
+// parentId on a normal task update; the web client uses taskParent.
+func (c *Client) setTaskParent(task map[string]any, parentID, oldParentID string) error {
+	taskID, _ := task["id"].(string)
+	projectID, _ := task["projectId"].(string)
+	parentID = strings.TrimSpace(parentID)
+	oldParentID = strings.TrimSpace(oldParentID)
+	if taskID == "" || parentID == "" || parentID == taskID {
+		return fmt.Errorf("choose another task as the parent")
+	}
+	if projectID == "" {
+		return fmt.Errorf("task has no list")
+	}
+	item := map[string]string{
+		"taskId":    taskID,
+		"projectId": projectID,
+		"parentId":  parentID,
+	}
+	if oldParentID != "" && oldParentID != parentID {
+		item["oldParentId"] = oldParentID
+	}
+	body, err := json.Marshal([]map[string]string{item})
+	if err != nil {
+		return err
+	}
+	raw, err := c.do(http.MethodPost, "/api/v2/batch/taskParent", body)
+	if err != nil {
+		return err
+	}
+	var resp struct {
+		ID2Error map[string]any `json:"id2error"`
+	}
+	if len(strings.TrimSpace(string(raw))) > 0 && json.Unmarshal(raw, &resp) == nil && len(resp.ID2Error) > 0 {
+		return fmt.Errorf("could not make the task a subtask: %v", resp.ID2Error)
+	}
+	updated, err := c.findTaskRawByID(taskID, projectID)
+	if err != nil {
+		return err
+	}
+	if pid, _ := updated["parentId"].(string); pid != parentID {
+		return fmt.Errorf("task did not become a subtask")
 	}
 	return nil
 }
@@ -583,6 +632,96 @@ func ParseReminderBefore(raw string) (time.Duration, bool) {
 		fmt.Sscanf(body, "%d", &m)
 	}
 	return time.Duration(h)*time.Hour + time.Duration(m)*time.Minute, true
+}
+
+// SetDueOnDay moves a task's due date onto day. An all-day task, or a task
+// with no due date, becomes all day on that date. A timed task keeps its
+// clock time, duration, and reminder.
+func (c *Client) SetDueOnDay(taskID, projectRef string, day time.Time) error {
+	task, err := c.findTaskRawByID(taskID, projectRef)
+	if err != nil {
+		return err
+	}
+	moveDueToDay(task, day)
+	return c.patchTaskMap(task)
+}
+
+// RestoreTaskDue writes the due date stored on task back to TickTick.
+func (c *Client) RestoreTaskDue(task Task) error {
+	raw, err := c.findTaskRawByID(task.ID, task.ProjectID)
+	if err != nil {
+		return err
+	}
+	applyStoredDue(raw, task)
+	return c.patchTaskMap(raw)
+}
+
+func moveDueToDay(task map[string]any, day time.Time) {
+	loc := time.Local
+	if loaded, err := time.LoadLocation(localTZ()); err == nil {
+		loc = loaded
+	}
+	day = time.Date(day.In(loc).Year(), day.In(loc).Month(), day.In(loc).Day(), 0, 0, 0, 0, loc)
+	dueRaw, _ := task["dueDate"].(string)
+	startRaw, _ := task["startDate"].(string)
+	allDay, _ := task["isAllDay"].(bool)
+	if strings.TrimSpace(dueRaw) == "" || allDay || !strings.Contains(dueRaw, "T") {
+		dateStr := day.Format("2006-01-02")
+		task["isAllDay"] = true
+		task["timeZone"] = localTZ()
+		task["startDate"] = dateStr
+		task["dueDate"] = dateStr
+		return
+	}
+	due, err := time.Parse(ticktickTimeLayout, dueRaw)
+	if err != nil {
+		dateStr := day.Format("2006-01-02")
+		task["isAllDay"] = true
+		task["timeZone"] = localTZ()
+		task["startDate"] = dateStr
+		task["dueDate"] = dateStr
+		return
+	}
+	start := due
+	if strings.TrimSpace(startRaw) != "" {
+		if parsed, err := time.Parse(ticktickTimeLayout, startRaw); err == nil {
+			start = parsed
+		}
+	}
+	startLocal := start.In(loc)
+	duration := due.In(loc).Sub(startLocal)
+	newStart := time.Date(day.Year(), day.Month(), day.Day(), startLocal.Hour(), startLocal.Minute(), startLocal.Second(), 0, loc)
+	task["isAllDay"] = false
+	task["timeZone"] = localTZ()
+	task["startDate"] = newStart.Format(ticktickTimeLayout)
+	task["dueDate"] = newStart.Add(duration).Format(ticktickTimeLayout)
+}
+
+func applyStoredDue(raw map[string]any, task Task) {
+	dueRaw := strings.TrimSpace(task.DueDate)
+	if dueRaw == "" {
+		raw["dueDate"] = ""
+		raw["startDate"] = ""
+		raw["isAllDay"] = false
+		return
+	}
+	if task.IsAllDay || !strings.Contains(dueRaw, "T") {
+		dateStr := dueRaw
+		if len(dateStr) >= 10 {
+			dateStr = dateStr[:10]
+		}
+		raw["isAllDay"] = true
+		raw["startDate"] = dateStr
+		raw["dueDate"] = dateStr
+		return
+	}
+	start := strings.TrimSpace(task.StartDate)
+	if start == "" {
+		start = dueRaw
+	}
+	raw["isAllDay"] = false
+	raw["startDate"] = start
+	raw["dueDate"] = dueRaw
 }
 
 // RescheduleTask sets due/start date and reminder to fire at due time.

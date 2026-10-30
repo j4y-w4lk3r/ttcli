@@ -47,18 +47,12 @@ func TestBuildPomoHourGridFullDay(t *testing.T) {
 	grid := buildPomoHourGrid(records, nil, now, nil, true)
 
 	var slotLabels []string
-	var nowIdx, lastPomoBeforeNow int
-	nowIdx = -1
-	lastPomoBeforeNow = -1
-	for i, row := range grid {
+	for _, row := range grid {
 		if row.kind == "slot" {
 			slotLabels = append(slotLabels, row.hourLabel)
 		}
 		if row.kind == "now" {
-			nowIdx = i
-		}
-		if row.kind == "pomo" && row.hour == 15 && nowIdx < 0 {
-			lastPomoBeforeNow = i
+			t.Fatal("now should not insert its own timeline row")
 		}
 	}
 	if len(slotLabels) != 24 {
@@ -67,25 +61,9 @@ func TestBuildPomoHourGridFullDay(t *testing.T) {
 	if slotLabels[0] != "00:00" || slotLabels[23] != "23:00" {
 		t.Fatalf("unexpected hour labels: first=%q last=%q", slotLabels[0], slotLabels[23])
 	}
-
-	foundPomo := false
-	foundNow := false
-	for _, row := range grid {
-		if row.kind == "pomo" {
-			foundPomo = true
-		}
-		if row.kind == "now" {
-			foundNow = true
-			if row.hourLabel != "15:47" {
-				t.Fatalf("now row clock=%q want 15:47", row.hourLabel)
-			}
-		}
-	}
-	if !foundPomo || !foundNow {
-		t.Fatalf("pomo=%v now=%v", foundPomo, foundNow)
-	}
-	if nowIdx >= 0 && lastPomoBeforeNow >= 0 && nowIdx <= lastPomoBeforeNow {
-		t.Fatalf("now row should follow earlier sessions in the hour")
+	plain := buildPomoHourGrid(records, nil, now, nil, false)
+	if len(plain) != len(grid) {
+		t.Fatalf("now changed the hour grid: %d vs %d", len(grid), len(plain))
 	}
 }
 
@@ -107,7 +85,7 @@ func TestNowRowAfterEarlierSessionsInHour(t *testing.T) {
 			kinds = append(kinds, row.kind)
 		}
 	}
-	want := []string{"slot", "pomo", "pomo", "now"}
+	want := []string{"slot", "pomo", "pomo"}
 	if len(kinds) != len(want) {
 		t.Fatalf("hour 16 rows=%v want %v", kinds, want)
 	}
@@ -115,6 +93,38 @@ func TestNowRowAfterEarlierSessionsInHour(t *testing.T) {
 		if kinds[i] != want[i] {
 			t.Fatalf("hour 16 rows=%v want %v", kinds, want)
 		}
+	}
+}
+
+func TestNowDotDoesNotMoveHourRows(t *testing.T) {
+	now := time.Date(2026, 10, 9, 13, 20, 0, 0, time.Local)
+	without := expandPomoGrid(buildPomoHourGrid(nil, nil, now, nil, false), 4)
+	withNow := placePomoNowDot(expandPomoGrid(buildPomoHourGrid(nil, nil, now, nil, true), 4), now)
+	if len(without) != len(withNow) {
+		t.Fatalf("now changed the stretched grid: %d vs %d", len(withNow), len(without))
+	}
+	dots := 0
+	for i, row := range withNow {
+		if without[i].kind != row.kind || without[i].hour != row.hour {
+			t.Fatalf("row %d moved: %+v vs %+v", i, row, without[i])
+		}
+		if row.kind == "slot" && row.nowDot {
+			t.Fatal("the hour label row should stay a plain hour rail")
+		}
+		if row.nowDot {
+			dots++
+			line := stripANSI(renderDayGridRow(row, now, false, 80, nil, nil, pomoTimelineLayout{}))
+			plain := stripANSI(renderDayGridRow(without[i], now, false, 80, nil, nil, pomoTimelineLayout{}))
+			if !strings.Contains(line, "●") {
+				t.Fatalf("missing dot: %q", line)
+			}
+			if railCol(line) != railCol(plain) {
+				t.Fatalf("dot shifted the rail:\n%s\n%s", line, plain)
+			}
+		}
+	}
+	if dots != 1 {
+		t.Fatalf("dots=%d", dots)
 	}
 }
 
@@ -189,9 +199,20 @@ func TestRenderHourGridPomoBlockInHourRow(t *testing.T) {
 	}
 }
 
+func TestSelectedHourRowStaysInColumn(t *testing.T) {
+	idle := stripANSI(renderHourSlotRow("09:00", true, 120, false, false))
+	selected := stripANSI(renderHourSlotRow("09:00", true, 120, true, false))
+	if railCol(idle) != railCol(selected) {
+		t.Fatalf("selected hour shifted:\n%s\n%s", selected, idle)
+	}
+	if strings.HasPrefix(strings.TrimLeft(selected, " "), "●") {
+		t.Fatalf("selection mark pushed the hour label: %q", selected)
+	}
+}
+
 func TestRenderHourSlotRowFullWidth(t *testing.T) {
-	busy := renderHourSlotRow("08:00", true, 80, false)
-	empty := renderHourSlotRow("10:00", false, 80, false)
+	busy := renderHourSlotRow("08:00", true, 80, false, false)
+	empty := renderHourSlotRow("10:00", false, 80, false, false)
 	if lipgloss.Width(busy) < 70 {
 		t.Fatalf("busy slot should span width: %d", lipgloss.Width(busy))
 	}
@@ -227,7 +248,7 @@ func TestPomoTimelineGridCursorFollowsNow(t *testing.T) {
 	loc := time.Local
 	now := time.Now().In(loc)
 	now = time.Date(now.Year(), now.Month(), now.Day(), 9, 11, 0, 0, loc)
-	grid := buildPomoHourGrid(nil, nil, now, nil, true)
+	grid := placePomoNowDot(buildPomoHourGrid(nil, nil, now, nil, true), now)
 	nowIdx := gridRowForNow(grid)
 	if nowIdx < 0 {
 		t.Fatal("expected now row in grid")
@@ -249,6 +270,15 @@ func TestPomoTimelineGridCursorFollowsNow(t *testing.T) {
 	if abs(nowIdx-mid) > 1 {
 		t.Fatalf("now row %d not near window center %d (window %d..%d)", nowIdx, mid, win.Start, win.End)
 	}
+}
+
+func railCol(line string) int {
+	for _, mark := range []string{"─", "╌"} {
+		if i := strings.Index(line, mark); i >= 0 {
+			return lipgloss.Width(line[:i])
+		}
+	}
+	return -1
 }
 
 func abs(n int) int {

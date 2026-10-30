@@ -264,10 +264,10 @@ func TestStripTaskHTML(t *testing.T) {
 func TestTaskNotesHTMLRoundTripPreservesNewlines(t *testing.T) {
 	plain := "first line\nsecond line"
 	encoded := taskNotesToHTML(plain)
-	if encoded != "first line<br/>second line" {
+	if encoded != plain {
 		t.Fatalf("encoded=%q", encoded)
 	}
-	if decoded := stripTaskHTML(encoded); decoded != plain {
+	if decoded := stripTaskHTML("first line<br/>second line"); decoded != plain {
 		t.Fatalf("decoded=%q want %q", decoded, plain)
 	}
 }

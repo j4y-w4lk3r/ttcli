@@ -22,7 +22,7 @@ func TestSelectedFocusLegendUsesSingleIndicator(t *testing.T) {
 func TestSelectedPomoTimelineStartsWithSelectionIndicator(t *testing.T) {
 	line := stripANSI(renderHourPomoRow(
 		0, 1, true, "send package back", colorBlue,
-		"10:08", "10:37", 29, 100, pomoTimelineLayout{suffixStartCol: 45},
+		"10:08", "10:37", 29, 100, pomoTimelineLayout{suffixStartCol: 45}, nil, time.Time{}, time.Time{},
 	))
 	if !strings.HasPrefix(line, "●") {
 		t.Fatalf("selected timeline row has blank gutter before indicator: %q", line)
@@ -33,7 +33,7 @@ func TestSelectedPomoRowsDoNotPaintGreyBackground(t *testing.T) {
 	withTrueColor(t)
 	line := renderHourPomoRow(
 		0, 1, true, "send package back", colorBlue,
-		"10:08", "10:37", 29, 100, pomoTimelineLayout{suffixStartCol: 45},
+		"10:08", "10:37", 29, 100, pomoTimelineLayout{suffixStartCol: 45}, nil, time.Time{}, time.Time{},
 	)
 	for background, count := range visibleBackgrounds(line) {
 		if count > 0 && background == ansiBGOverlay {

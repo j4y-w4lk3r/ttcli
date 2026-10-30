@@ -84,18 +84,10 @@ func pomoGridRowParts(row dayGridRow, selected bool, taskColors map[string]lipgl
 }
 
 func hourPauseRowParts(spell focus.PauseSpell, selected bool, now time.Time) (body, suffix string) {
-	startClock := spell.Start.Local().Format("15:04")
-	endClock := ""
-	if !spell.End.IsZero() {
-		endClock = spell.End.Local().Format("15:04")
-	} else {
-		endClock = now.Local().Format("15:04")
-	}
-	block := pauseBlockStyle.Render("▌")
-	start := pomoTimeStyle.Render(startClock) + " "
-	label := pauseLabelStyle.Render("paused")
-	body = block + start + label + " · " + renderPauseTimelineTitle(spell.TaskTitle, selected)
-	return body, formatPausePomoSuffixColumns(endClock, spell, now, selected)
+	block := pauseBlockStyle.Render(pauseMark)
+	clock := pauseLabelStyle.Render(pauseTimelineClock(spell))
+	body = block + " " + clock + "  " + renderPauseTimelineTitle(spell.TaskTitle, selected)
+	return body, formatPauseTimelineSuffix(spell, now, selected)
 }
 
 func hourPomoRowParts(title string, taskColor lipgloss.Color, startClock, endClock string, mins int, selected bool) (body, suffix string) {

@@ -75,7 +75,6 @@ func buildPomoHourGrid(records []ticktick.FocusRecord, pauses []focus.PauseSpell
 	}
 
 	var rows []dayGridRow
-	nowPlaced := false
 	for hour := 0; hour < pomoTimelineHours; hour++ {
 		items := mergeHourTimelineItems(byHour[hour], byHourPause[hour])
 		sum := slotSummary{sessions: len(byHour[hour]), mins: slotFocusMins(byHour[hour])}
@@ -89,10 +88,6 @@ func buildPomoHourGrid(records []ticktick.FocusRecord, pauses []focus.PauseSpell
 		})
 
 		for j, item := range items {
-			if showNow && hour == now.Hour() && !nowPlaced && item.start.After(now) {
-				rows = append(rows, nowGridRow(hour, now))
-				nowPlaced = true
-			}
 			switch item.kind {
 			case "pomo":
 				rows = append(rows, dayGridRow{
@@ -101,6 +96,7 @@ func buildPomoHourGrid(records []ticktick.FocusRecord, pauses []focus.PauseSpell
 					inHourGrid:    true,
 					recIdx:        item.pomo.idx,
 					rec:           item.pomo.rec,
+					sessionPauses: pausesInsideRecord(item.pomo.rec, pauses),
 					pomoSlotIndex: j,
 					pomoSlotCount: len(items),
 				})
@@ -117,16 +113,11 @@ func buildPomoHourGrid(records []ticktick.FocusRecord, pauses []focus.PauseSpell
 			}
 		}
 
-		if showNow && hour == now.Hour() && !nowPlaced {
-			rows = append(rows, nowGridRow(hour, now))
-			nowPlaced = true
-		}
-
 		if liveActive && liveHour == hour {
 			rows = append(rows, dayGridRow{hour: hour, kind: "live", inHourGrid: true})
 		}
 	}
-	return rows
+	return closeSessionAroundPauses(rows)
 }
 
 func mergeHourTimelineItems(pomos []indexedFocus, pauses []indexedPause) []hourTimelineItem {
@@ -146,14 +137,6 @@ func mergeHourTimelineItems(pomos []indexedFocus, pauses []indexedPause) []hourT
 	return out
 }
 
-func nowGridRow(hour int, now time.Time) dayGridRow {
-	return dayGridRow{
-		hour:      hour,
-		hourLabel: now.Format("15:04"),
-		kind:      "now",
-	}
-}
-
 func fmtHourLabel(hour int) string {
 	return fmt.Sprintf("%02d:00", hour)
 }
@@ -169,21 +152,68 @@ func gridRowForHour(grid []dayGridRow, hour int) int {
 			return i
 		}
 	}
+	for i, row := range grid {
+		if row.hour == hour {
+			return i
+		}
+	}
 	return 0
 }
 
 func gridRowForNow(grid []dayGridRow) int {
 	for i, row := range grid {
-		if row.kind == "now" {
+		if row.nowDot || row.kind == "now" {
 			return i
 		}
 	}
 	return -1
 }
 
-func renderHourSlotGapRow(width int, busy bool, selected bool) string {
+// placePomoNowDot paints the current-time mark on a row the hour grid already
+// has. A separate now row would shift every later hour while scrolling.
+func placePomoNowDot(grid []dayGridRow, now time.Time) []dayGridRow {
+	if len(grid) == 0 {
+		return grid
+	}
+	hour := now.Hour()
+	slot := -1
+	var gaps []int
+	for i, row := range grid {
+		grid[i].nowDot = false
+		if row.kind == "slot" && row.hour == hour {
+			slot = i
+			gaps = nil
+			continue
+		}
+		if slot < 0 {
+			continue
+		}
+		if row.kind == "slot" {
+			break
+		}
+		if row.hour == hour && row.kind == "gap" {
+			gaps = append(gaps, i)
+		}
+	}
+	target := slot
+	if len(gaps) > 0 {
+		idx := now.Minute() * len(gaps) / 60
+		if idx >= len(gaps) {
+			idx = len(gaps) - 1
+		}
+		target = gaps[idx]
+	}
+	if target >= 0 {
+		grid[target].nowDot = true
+	}
+	return grid
+}
+
+func renderHourSlotGapRow(width int, busy bool, selected bool, nowDot bool) string {
 	timeCol := hintStyle.Render(strings.Repeat(" ", dayTimeColW))
-	if selected {
+	if nowDot {
+		timeCol = pomoNowStyle.Render(fmtTimeCol("●"))
+	} else if selected {
 		timeCol = pomoTimelineSelectionPrefix(true) + hintStyle.Render(strings.Repeat(" ", dayTimeColW-2))
 	}
 	gap := dayTimelineGap()
@@ -200,17 +230,25 @@ func renderHourSlotGapRow(width int, busy bool, selected bool) string {
 	return truncateInner(line, width)
 }
 
-func renderHourSlotRow(label string, busy bool, width int, selected bool) string {
-	timeCol := hintStyle.Render(fmtTimeCol(label))
+func renderHourSlotRow(label string, busy bool, width int, selected bool, nowDot bool) string {
+	style := hintStyle
 	if busy {
-		timeCol = pomoTimeStyle.Render(fmtTimeCol(label))
+		style = pomoTimeStyle
 	}
 	if selected {
-		timeCol = pomoTimelineSelectionPrefix(true) + timeCol
+		style = pomoNowStyle
 	}
+	timeCol := style.Render(fmtTimeCol(label))
 	gap := dayTimelineGap()
 	railW := dayRailWidth(width)
-	rail := sectionRuleStyle.Render(strings.Repeat(daySlotRail, railW))
+	railStyle := sectionRuleStyle
+	if selected {
+		railStyle = pomoNowStyle
+	}
+	rail := railStyle.Render(strings.Repeat(daySlotRail, railW))
+	if nowDot && railW > 0 {
+		rail = pomoNowStyle.Render("●") + railStyle.Render(strings.Repeat(daySlotRail, railW-1))
+	}
 	line := timeCol + gap + rail
 	if selected {
 		line = highlightPomoTimelineRow(line, true)
@@ -237,7 +275,7 @@ func renderHourNowRow(timeLabel string, width int, selected bool) string {
 	return truncateInner(line, width)
 }
 
-func renderHourPomoRow(index, total int, selected bool, title string, taskColor lipgloss.Color, startClock, endClock string, mins int, width int, layout pomoTimelineLayout) string {
+func renderHourPomoRow(index, total int, selected bool, title string, taskColor lipgloss.Color, startClock, endClock string, mins int, width int, layout pomoTimelineLayout, pauses []focus.PauseSpell, spanStart, spanEnd time.Time) string {
 	timeCol := hintStyle.Render(strings.Repeat(" ", dayTimeColW))
 	if selected {
 		timeCol = pomoTimelineSelectionPrefix(true) + hintStyle.Render(strings.Repeat(" ", dayTimeColW-2))
@@ -246,7 +284,32 @@ func renderHourPomoRow(index, total int, selected bool, title string, taskColor 
 	contentW := dayTimelineContentW(width)
 	body, suffix := hourPomoRowParts(title, taskColor, startClock, endClock, mins, selected)
 	line := alignPomoRowColumns(body, suffix, contentW, layout)
+	line = appendSessionPauseTrack(line, contentW, taskColor, spanStart, spanEnd, pauses, selected)
 	return truncateInner(highlightPomoTimelineRow(timeCol+gap+line, selected), width)
+}
+
+func renderHourPomoOpenRow(selected bool, title string, taskColor lipgloss.Color, startClock string, width int) string {
+	timeCol := hintStyle.Render(strings.Repeat(" ", dayTimeColW))
+	if selected {
+		timeCol = pomoTimelineSelectionPrefix(true) + hintStyle.Render(strings.Repeat(" ", dayTimeColW-2))
+	}
+	body, _ := hourPomoRowParts(title, taskColor, startClock, "", 0, selected)
+	return truncateInner(highlightPomoTimelineRow(timeCol+dayTimelineGap()+body, selected), width)
+}
+
+func renderHourPomoCloseRow(selected bool, title string, taskColor lipgloss.Color, endClock string, mins int, width int, layout pomoTimelineLayout, pauses []focus.PauseSpell, spanStart, spanEnd time.Time) string {
+	timeCol := hintStyle.Render(strings.Repeat(" ", dayTimeColW))
+	if selected {
+		timeCol = pomoTimelineSelectionPrefix(true) + hintStyle.Render(strings.Repeat(" ", dayTimeColW-2))
+	}
+	contentW := dayTimelineContentW(width)
+	suffix := formatPomoSuffixColumns(endClock, mins, selected, title, taskColor)
+	if isUnclaimedFocusTitle(title) {
+		suffix = formatUnclaimedPomoSuffixColumns(endClock, mins, selected)
+	}
+	line := alignPomoRowColumns("", suffix, contentW, layout)
+	line = appendSessionPauseTrack(line, contentW, taskColor, spanStart, spanEnd, pauses, selected)
+	return truncateInner(highlightPomoTimelineRow(timeCol+dayTimelineGap()+line, selected), width)
 }
 
 func renderHourPauseRow(spell focus.PauseSpell, selected bool, width int, layout pomoTimelineLayout, now time.Time) string {

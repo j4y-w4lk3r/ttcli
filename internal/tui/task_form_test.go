@@ -230,8 +230,9 @@ func TestTaskFormShowsCustomRuleConditionally(t *testing.T) {
 
 func TestEditSubtaskCanBecomeANormalTask(t *testing.T) {
 	m := fixtureModel(120, 40)
-	m.tasks = append(m.tasks, ticktick.Task{ID: "parent", Title: "yu0"})
-	m.openEditTaskForm(ticktick.Task{ID: "child", Title: "fm2", ParentID: "parent"})
+	m.projectID = "p0"
+	m.tasks = []ticktick.Task{{ID: "parent", Title: "yu0", ProjectID: "p0"}}
+	m.openEditTaskForm(ticktick.Task{ID: "child", Title: "fm2", ProjectID: "p0", ParentID: "parent"})
 	if !strings.Contains(m.renderAddTaskForm(100, 80), "subtask of yu0") {
 		t.Fatal("edit form should show the parent")
 	}
@@ -241,8 +242,38 @@ func TestEditSubtaskCanBecomeANormalTask(t *testing.T) {
 		t.Fatalf("tab field=%d", out.addTaskField)
 	}
 	out, _ = out.updateAddTaskForm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
-	if out.editTaskParentIdx == 0 || !strings.Contains(out.renderAddTaskForm(100, 80), "normal task") {
+	if out.chosenParentID() != "" || !strings.Contains(out.renderAddTaskForm(100, 80), "normal task") {
 		t.Fatal("] should offer to save the subtask as a normal task")
+	}
+}
+
+func TestEditCanNestUnderAnotherTask(t *testing.T) {
+	m := fixtureModel(120, 40)
+	m.projectID = "home"
+	m.tasks = []ticktick.Task{
+		{ID: "setup", Title: "one time setup", ProjectID: "home"},
+		{ID: "tasks", Title: "tasks", ProjectID: "home"},
+		{ID: "garbage", Title: "garbage", ProjectID: "home", ParentID: "tasks"},
+		{ID: "laundry", Title: "laundry", ProjectID: "home"},
+	}
+	m.openEditTaskForm(m.tasks[3])
+	if !strings.Contains(m.renderAddTaskForm(100, 80), "normal task") {
+		t.Fatal("a root task should start as a normal task")
+	}
+	if strings.Contains(m.renderAddTaskForm(100, 80), "subtask of garbage") {
+		t.Fatal("a subtask should not be offered as a parent")
+	}
+	m.addTaskField = addTaskFieldParent
+	var out model
+	for i := 0; i < len(m.editParentChoices); i++ {
+		out, _ = m.updateAddTaskForm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
+		m = out
+		if m.chosenParentID() == "tasks" {
+			break
+		}
+	}
+	if m.chosenParentID() != "tasks" || !strings.Contains(m.renderAddTaskForm(100, 80), "subtask of tasks") {
+		t.Fatalf("choice=%q", m.parentFieldChoice())
 	}
 }
 
@@ -275,9 +306,38 @@ func TestEditCompletedTaskUsesItsOwnList(t *testing.T) {
 	}
 }
 
+func TestEditFormPutsNotesBesideTheSchedule(t *testing.T) {
+	m := fixtureModel(160, 40)
+	m.openEditTaskForm(ticktick.Task{
+		ID: "laundry", Title: "laundry", ProjectID: "home",
+		Content: "1. white\nTemperature: 40°C\nSpin: 1000 rpm\n\n2. black",
+	})
+	wide := stripANSI(m.renderAddTaskForm(140, 36))
+	sameRow := false
+	noteRows := 0
+	for _, line := range strings.Split(wide, "\n") {
+		if strings.Contains(line, "Notes") && strings.Contains(line, "Due date") {
+			sameRow = true
+		}
+		if strings.Contains(line, "┃") {
+			noteRows++
+		}
+	}
+	if !sameRow || noteRows < 12 {
+		t.Fatalf("sameRow=%v noteRows=%d\n%s", sameRow, noteRows, wide)
+	}
+	narrow := stripANSI(m.renderAddTaskForm(80, 36))
+	for _, line := range strings.Split(narrow, "\n") {
+		if strings.Contains(line, "Notes") && strings.Contains(line, "Due date") {
+			t.Fatalf("narrow form should keep one column:\n%s", narrow)
+		}
+	}
+}
+
 func TestNormalTaskHidesTheParentField(t *testing.T) {
 	m := fixtureModel(120, 40)
-	m.openEditTaskForm(ticktick.Task{ID: "1", Title: "fm0"})
+	m.tasks = []ticktick.Task{{ID: "1", Title: "fm0", ProjectID: "alone"}}
+	m.openEditTaskForm(m.tasks[0])
 	if strings.Contains(m.renderAddTaskForm(100, 80), "Parent") {
 		t.Fatal("a normal task should not show the parent field")
 	}

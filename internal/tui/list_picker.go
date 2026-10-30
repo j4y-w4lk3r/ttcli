@@ -29,7 +29,9 @@ type listPickerRow struct {
 func (m *model) openListPicker(purpose listPickerPurpose) {
 	m.listPickerPurpose = purpose
 	m.listPickerCursor = 0
+	m.listPickerQuery = ""
 	m.listPickerRows = m.buildListPickerRows(purpose)
+	m.listPickerAll = append([]listPickerRow(nil), m.listPickerRows...)
 	if purpose == pickerMoveTask {
 		toMove := m.tasksToMove()
 		if len(toMove) == 0 {
@@ -125,9 +127,19 @@ func (m model) renderListPickerOverlay() string {
 			lines = append(lines, helpInnerLine(hintStyle.Render(fmt.Sprintf("%d tasks selected", len(m.listPickerTaskIDs))), innerW))
 		}
 	}
+	query := m.listPickerQuery
+	if query == "" {
+		query = "type a list name"
+		lines = append(lines, helpInnerLine(hintStyle.Render(query), innerW))
+	} else {
+		lines = append(lines, helpInnerLine(query, innerW))
+	}
 	lines = append(lines, helpInnerLine(focusPickerDivider(innerW), innerW))
 
 	win := computeScrollWindow(m.listPickerCursor, len(m.listPickerRows), listH)
+	if len(m.listPickerRows) == 0 {
+		lines = append(lines, helpInnerLine(hintStyle.Render("(no matching list)"), innerW))
+	}
 	for i := win.Start; i < win.End; i++ {
 		row := m.listPickerRows[i]
 		selected := i == m.listPickerCursor
@@ -158,7 +170,7 @@ func (m model) renderListPickerOverlay() string {
 	if m.listPickerPurpose == pickerAddList {
 		action = "choose folder"
 	}
-	if h := m.keyHint("j/k select · enter " + action + " · esc cancel"); h != "" {
+	if h := m.keyHint("type to filter · j/k · enter " + action + " · esc cancel"); h != "" {
 		lines = append(lines, helpInnerLine(h, innerW))
 	}
 	box := helpBoxStyle.Width(boxW).Render(strings.Join(lines, "\n"))
@@ -169,6 +181,19 @@ func (m model) updateListPicker(msg tea.KeyMsg) (model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.mode = modeNormal
+		m.listPickerQuery = ""
+		return m, nil
+	case "backspace", "ctrl+h":
+		m.listPickerQuery = trimLastRune(m.listPickerQuery)
+		m.applyListPickerFilter()
+		return m, nil
+	case "ctrl+u":
+		m.listPickerQuery = ""
+		m.applyListPickerFilter()
+		return m, nil
+	case " ":
+		m.listPickerQuery += " "
+		m.applyListPickerFilter()
 		return m, nil
 	case "j", "down":
 		if len(m.listPickerRows) > 0 {
@@ -222,8 +247,41 @@ func (m model) updateListPicker(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.addInput.Focus()
 			return m, textinput.Blink
 		}
+	default:
+		if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
+			m.listPickerQuery += string(msg.Runes)
+			m.applyListPickerFilter()
+		}
 	}
 	return m, nil
+}
+
+func (m *model) applyListPickerFilter() {
+	m.listPickerRows = filterListPickerRows(m.listPickerAll, m.listPickerQuery)
+	if m.listPickerCursor >= len(m.listPickerRows) {
+		m.listPickerCursor = 0
+	}
+	if m.listPickerQuery != "" {
+		m.listPickerCursor = 0
+	}
+}
+
+func filterListPickerRows(rows []listPickerRow, query string) []listPickerRow {
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return append([]listPickerRow(nil), rows...)
+	}
+	var prefix, contains []listPickerRow
+	for _, row := range rows {
+		name := strings.ToLower(row.name)
+		switch {
+		case strings.HasPrefix(name, q):
+			prefix = append(prefix, row)
+		case strings.Contains(name, q):
+			contains = append(contains, row)
+		}
+	}
+	return append(prefix, contains...)
 }
 
 func (m model) parentChildLinks(parent ticktick.Task) []ticktick.TaskParentLink {

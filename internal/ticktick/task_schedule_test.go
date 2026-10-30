@@ -263,6 +263,52 @@ func TestUpdateTaskClearsAParentThatOnlyListsTheChild(t *testing.T) {
 	}
 }
 
+func TestUpdateTaskNestsUnderAParent(t *testing.T) {
+	const projectID = "0123456789abcdef01234567"
+	const childID = "fedcba9876543210fedcba98"
+	const parentID = "abcdef0123456789abcdef01"
+	nested := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/batch/task":
+			_, _ = w.Write([]byte(`{}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/batch/taskParent":
+			var items []map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&items); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if len(items) != 1 || items[0]["taskId"] != childID || items[0]["projectId"] != projectID || items[0]["parentId"] != parentID {
+				t.Errorf("parent body=%v", items)
+			}
+			if _, ok := items[0]["oldParentId"]; ok {
+				t.Errorf("new parent link should omit oldParentId: %v", items[0])
+			}
+			nested = true
+			_, _ = w.Write([]byte(`{"id2error":{}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/project/"+projectID+"/tasks":
+			parent := ""
+			if nested {
+				parent = parentID
+			}
+			_, _ = w.Write([]byte(`[{"id":"` + childID + `","projectId":"` + projectID + `","title":"laundry","parentId":"` + parent + `","status":0}]`))
+		default:
+			_, _ = w.Write([]byte(`[]`))
+		}
+	}))
+	defer server.Close()
+	client := repositoryTestClient(server)
+	err := client.UpdateTask(childID, projectID, TaskUpdateInput{
+		Title: "laundry", ParentID: parentID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !nested {
+		t.Fatal("expected taskParent request")
+	}
+}
+
 func TestUpdateTaskRenamesACompletedTask(t *testing.T) {
 	const projectID = "0123456789abcdef01234567"
 	const taskID = "fedcba9876543210fedcba98"
@@ -509,6 +555,89 @@ func TestDropMissingChildIDsClearsADeletedSubtask(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("n=%d", n)
+	}
+}
+
+func TestMoveDueToDayKeepsTheClockAndReminder(t *testing.T) {
+	t.Setenv("TZ", "Europe/Warsaw")
+	loc, err := time.LoadLocation("Europe/Warsaw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := map[string]any{
+		"id":        "t1",
+		"startDate": "2026-10-01T09:00:00.000+0200",
+		"dueDate":   "2026-10-01T10:30:00.000+0200",
+		"isAllDay":  false,
+		"reminder":  "TRIGGER:-PT15M",
+	}
+	day := time.Date(2026, 10, 8, 15, 0, 0, 0, loc)
+	moveDueToDay(task, day)
+	if task["isAllDay"] != false || task["reminder"] != "TRIGGER:-PT15M" {
+		t.Fatalf("task=%v", task)
+	}
+	start, err := time.Parse(ticktickTimeLayout, task["startDate"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	due, err := time.Parse(ticktickTimeLayout, task["dueDate"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start = start.In(loc)
+	due = due.In(loc)
+	if start.Format("2006-01-02 15:04") != "2026-10-08 09:00" || due.Format("15:04") != "10:30" {
+		t.Fatalf("start=%s due=%s", start, due)
+	}
+}
+
+func TestMoveDueToDayUsesAllDayWhenThereIsNoTime(t *testing.T) {
+	t.Setenv("TZ", "Europe/Warsaw")
+	task := map[string]any{"id": "t1", "reminder": "TRIGGER:PT0S"}
+	moveDueToDay(task, time.Date(2026, 10, 8, 0, 0, 0, 0, time.UTC))
+	if task["isAllDay"] != true || task["dueDate"] != "2026-10-08" || task["startDate"] != "2026-10-08" {
+		t.Fatalf("task=%v", task)
+	}
+	if task["reminder"] != "TRIGGER:PT0S" {
+		t.Fatalf("reminder=%v", task["reminder"])
+	}
+}
+
+func TestSetDueOnDayPostsTheShiftedDate(t *testing.T) {
+	t.Setenv("TZ", "Europe/Warsaw")
+	const (
+		projectID = "0123456789abcdef01234567"
+		taskID    = "abcdef0123456789abcdef01"
+	)
+	var updated map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/project/"+projectID+"/tasks":
+			_, _ = w.Write([]byte(`[{"id":"` + taskID + `","projectId":"` + projectID + `","title":"Ship","dueDate":"2026-10-01","isAllDay":true,"reminder":"TRIGGER:PT0S"}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/batch/task":
+			var payload struct {
+				Update []map[string]any `json:"update"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if len(payload.Update) == 1 {
+				updated = payload.Update[0]
+			}
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := repositoryTestClient(server)
+	day := time.Date(2026, 10, 8, 12, 0, 0, 0, time.Local)
+	if err := client.SetDueOnDay(taskID, projectID, day); err != nil {
+		t.Fatal(err)
+	}
+	if updated["dueDate"] != "2026-10-08" || updated["isAllDay"] != true || updated["reminder"] != "TRIGGER:PT0S" || updated["title"] != "Ship" {
+		t.Fatalf("updated=%v", updated)
 	}
 }
 

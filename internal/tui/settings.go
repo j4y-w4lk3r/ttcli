@@ -171,6 +171,55 @@ func (d PomoFocusDesign) Next() PomoFocusDesign {
 	}
 }
 
+type PomoLogDesign string
+
+const (
+	PomoLogRails    PomoLogDesign = "rails"
+	PomoLogSessions PomoLogDesign = "sessions"
+	PomoLogHours    PomoLogDesign = "log"
+	PomoLogCards    PomoLogDesign = "cards"
+	PomoLogTape     PomoLogDesign = "tape"
+)
+
+func (d PomoLogDesign) Label() string {
+	switch d {
+	case PomoLogSessions:
+		return "sessions"
+	case PomoLogHours:
+		return "log"
+	case PomoLogCards:
+		return "cards"
+	case PomoLogTape:
+		return "tape"
+	default:
+		return "rails"
+	}
+}
+
+func (d PomoLogDesign) Next() PomoLogDesign {
+	switch d {
+	case PomoLogRails:
+		return PomoLogSessions
+	case PomoLogSessions:
+		return PomoLogHours
+	case PomoLogHours:
+		return PomoLogCards
+	case PomoLogCards:
+		return PomoLogTape
+	default:
+		return PomoLogRails
+	}
+}
+
+func normalizePomoLogDesign(design PomoLogDesign) PomoLogDesign {
+	switch design {
+	case PomoLogRails, PomoLogSessions, PomoLogHours, PomoLogCards, PomoLogTape:
+		return design
+	default:
+		return PomoLogRails
+	}
+}
+
 func normalizePomoFocusDesign(design PomoFocusDesign) PomoFocusDesign {
 	switch design {
 	case PomoFocusArc, PomoFocusBar, PomoFocusCard:
@@ -241,6 +290,7 @@ type uiSettings struct {
 	PomoTimelineDensity    PomoTimelineDensity     `json:"pomoTimelineDensity,omitempty"`
 	CalendarWeekDensity    PomoTimelineDensity     `json:"calendarWeekDensity,omitempty"`
 	PomoFocusDesign        PomoFocusDesign         `json:"pomoFocusDesign,omitempty"`
+	PomoLogDesign          PomoLogDesign           `json:"pomoLogDesign,omitempty"`
 	PomoDailyGoal          int                     `json:"pomoDailyGoal,omitempty"`
 	TaskDetailLayout       TaskDetailLayout        `json:"taskDetailLayout,omitempty"`
 	LastView               string                  `json:"lastView,omitempty"`
@@ -281,6 +331,7 @@ func (s *uiSettings) applyPlanningDefaults() {
 
 func (s *uiSettings) applyPomoDefaults() {
 	s.PomoFocusDesign = normalizePomoFocusDesign(s.PomoFocusDesign)
+	s.PomoLogDesign = normalizePomoLogDesign(s.PomoLogDesign)
 	if s.PomoDailyGoal < 1 || s.PomoDailyGoal > 999 {
 		s.PomoDailyGoal = dailyPomoGoal
 	}
@@ -338,6 +389,7 @@ func defaultUISettings() uiSettings {
 		WeekStartsOn:          "monday",
 		CalendarWeekDensity:   PomoDensityStretch,
 		PomoFocusDesign:       PomoFocusArc,
+		PomoLogDesign:         PomoLogRails,
 		PomoDailyGoal:         dailyPomoGoal,
 		TaskScope:             TaskScopeOpen,
 	}

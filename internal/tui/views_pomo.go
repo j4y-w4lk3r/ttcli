@@ -82,12 +82,16 @@ type dayGridRow struct {
 	hourLabel     string
 	kind          string // "slot", "pomo", "pause", "now", "live", "gap"
 	inHourGrid    bool
+	nowDot        bool
 	slotBusy      bool
 	slotSummary   slotSummary
 	recIdx        int
 	rec           ticktick.FocusRecord
 	pauseIdx      int
 	pause         focus.PauseSpell
+	sessionPauses []focus.PauseSpell
+	sessionOpen   bool
+	sessionClose  bool
 	pomoSlotIndex int
 	pomoSlotCount int
 }
@@ -114,9 +118,9 @@ func dayGridTimeCol(label string) string {
 func renderDayGridRow(row dayGridRow, now time.Time, selected bool, width int, taskColors map[string]lipgloss.Color, live *focus.Session, layout pomoTimelineLayout) string {
 	switch row.kind {
 	case "slot":
-		return renderHourSlotRow(row.hourLabel, row.slotBusy, width, selected)
+		return renderHourSlotRow(row.hourLabel, row.slotBusy, width, selected, row.nowDot)
 	case "gap":
-		return renderHourSlotGapRow(width, row.slotBusy, selected)
+		return renderHourSlotGapRow(width, row.slotBusy, selected, row.nowDot)
 	case "now":
 		label := row.hourLabel
 		if label == "" {
@@ -157,6 +161,14 @@ func renderDayGridRow(row dayGridRow, now time.Time, selected bool, width int, t
 			end = ""
 		}
 		if row.inHourGrid {
+			startAt, _ := focusTimeLocal(row.rec.StartTime)
+			endAt, _ := focusTimeLocal(row.rec.EndTime)
+			if row.sessionClose {
+				return renderHourPomoCloseRow(selected, title, col, end, mins, width, layout, row.sessionPauses, startAt, endAt)
+			}
+			if row.sessionOpen {
+				return renderHourPomoOpenRow(selected, title, col, start, width)
+			}
 			return renderHourPomoRow(
 				row.pomoSlotIndex,
 				row.pomoSlotCount,
@@ -168,6 +180,9 @@ func renderDayGridRow(row dayGridRow, now time.Time, selected bool, width int, t
 				mins,
 				width,
 				layout,
+				row.sessionPauses,
+				startAt,
+				endAt,
 			)
 		}
 		return renderDayPomoRow(
@@ -331,12 +346,13 @@ func (m model) renderPomoFocusPanel(w, innerLines int) string {
 			lines = append(lines, "")
 			lines = append(lines, done...)
 		}
+		lines = append(lines, "", truncateInner(sectionHeader("Focus", w), w))
 		legendBudget := innerLines - len(lines) - 2
 		if legendBudget < 1 {
 			legendBudget = 1
 		}
-		if legendBudget > 4 {
-			legendBudget = 4
+		if legendBudget > 6 {
+			legendBudget = 6
 		}
 		lines = append(lines, renderFocusLegend(legendSlices, w, m.pomoLegendCursor, legendBudget)...)
 	}
@@ -380,10 +396,10 @@ func (m model) renderPomoTimelinePanel(w, innerLines int) string {
 	compactGrid := buildDayGrid(records, pauses, anchor, live, showNow)
 	taskColors := taskColorMap(aggregateFocusByTask(records))
 	layout := computePomoTimelineLayout(compactGrid, dayTimelineContentW(contentW), taskColors, live, anchor)
-	lines = append(lines, truncateInner(timelineSectionHeader(records, m.pomoViewDate, contentW)+"  "+hintStyle.Render(m.pomoTimelineDensity().Label()), contentW))
+	lines = append(lines, truncateInner(timelineSectionHeader(records, m.pomoViewDate, contentW)+"  "+hintStyle.Render(m.pomoTimelineDesignLabel()), contentW))
 
 	maxRows := m.pomoTimelineMaxRows(innerLines)
-	grid := expandPomoGrid(compactGrid, m.pomoTimelineGapLines(innerLines))
+	grid := m.pomoDisplayGrid(compactGrid, innerLines, anchor)
 	gridCursor := m.pomoTimelineGridCursor(grid)
 	win := scrollWindow{}
 	if m.pomoFollowNow && showNow {
@@ -401,16 +417,20 @@ func (m model) renderPomoTimelinePanel(w, innerLines int) string {
 			tailBusy = row.slotBusy
 		}
 		selected := i == gridCursor
-		gridLines = append(gridLines, renderDayGridRow(row, anchor, selected, contentW, taskColors, live, layout))
+		if m.pomoLogDesign() == PomoLogRails {
+			gridLines = append(gridLines, renderDayGridRow(row, anchor, selected, contentW, taskColors, live, layout))
+		} else {
+			gridLines = append(gridLines, renderPomoLogRow(m.pomoLogDesign(), row, anchor, selected, contentW, taskColors, live, layout))
+		}
 	}
-	if m.pomoTimelineDensity() == PomoDensityStretch {
+	if m.pomoLogDesign() == PomoLogRails && m.pomoTimelineDensity() == PomoDensityStretch {
 		gridLines = fillPomoTimelineStretch(gridLines, gridBudget, contentW, tailBusy)
 	} else if len(gridLines) > gridBudget {
 		gridLines = gridLines[:gridBudget]
 	}
 	lines = append(lines, gridLines...)
 
-	if h := m.keyHint("[/] day · t now · z density · j/k line · J/K session · T switch · e rename · n add · x delete"); h != "" {
+	if h := m.keyHint("[/] day · t now · b design · z density · j/k line · J/K session · T switch · e rename · n add · x delete"); h != "" {
 		lines = append(lines, truncateInner(h, contentW))
 	}
 	return fitLines(strings.Join(padTimelinePanelLines(lines, w, contentW), "\n"), innerLines)

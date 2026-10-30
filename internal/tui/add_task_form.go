@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -43,7 +44,7 @@ var (
 		"RRULE:… or ERULE:…",
 		"none · 0 · 5 · 15 · 30 · 60",
 		"none · low · med · high",
-		"[ ] keep the subtask or make it a normal task",
+		"[ ] choose a parent in this list",
 	}
 	addTaskRepeatOpts     = []string{"none", "daily", "weekdays", "weekly", "custom"}
 	addTaskRepeatFromOpts = []struct {
@@ -156,7 +157,14 @@ func (m *model) openEditTaskForm(t ticktick.Task) {
 	m.addTaskRepeatIdx = repeatOptionIndex(t.RepeatFlag)
 	m.addTaskRepeatFromIdx = repeatFromOptionIndex(t.RepeatFrom.Int())
 	m.editTaskParentID, m.editTaskParentTitle = m.listingParent(t)
+	m.editParentChoices = m.parentChoicesFor(t)
 	m.editTaskParentIdx = 0
+	for i, choice := range m.editParentChoices {
+		if choice.id == m.editTaskParentID {
+			m.editTaskParentIdx = i
+			break
+		}
+	}
 	if addTaskRepeatOpts[m.addTaskRepeatIdx] == "custom" {
 		m.addTaskRepeatInput.SetValue(t.RepeatFlag)
 	}
@@ -175,6 +183,7 @@ func (m *model) resetTaskFormFields() {
 	m.editTaskParentID = ""
 	m.editTaskParentTitle = ""
 	m.editTaskParentIdx = 0
+	m.editParentChoices = nil
 	m.taskTitleInput.SetValue("")
 	m.taskTitleInput.Placeholder = "task title…"
 	m.addTaskNotesInput.Reset()
@@ -287,7 +296,7 @@ func (m model) taskFormFieldVisible(field int) bool {
 	case addTaskFieldRepeatRule:
 		return addTaskRepeatOpts[m.addTaskRepeatIdx] == "custom"
 	case addTaskFieldParent:
-		return m.editTaskParentID != ""
+		return m.mode == modeEditTask && len(m.editParentChoices) > 1
 	default:
 		return true
 	}
@@ -327,14 +336,77 @@ func (m model) taskTitleByID(id string) string {
 	return ""
 }
 
+type parentChoice struct {
+	id    string
+	title string
+}
+
+func (m model) parentChoicesFor(task ticktick.Task) []parentChoice {
+	project := task.ProjectID
+	if project == "" {
+		project = m.projectID
+	}
+	currentID, currentTitle := m.listingParent(task)
+	var roots []parentChoice
+	seen := map[string]bool{}
+	add := func(id, title string) {
+		if id == "" || id == task.ID || seen[id] {
+			return
+		}
+		seen[id] = true
+		if strings.TrimSpace(title) == "" {
+			title = m.taskTitleByID(id)
+		}
+		if strings.TrimSpace(title) == "" {
+			title = "task"
+		}
+		roots = append(roots, parentChoice{id: id, title: title})
+	}
+	for _, other := range m.tasks {
+		if other.ID == "" || other.ID == task.ID || other.Trashed() {
+			continue
+		}
+		if project != "" && other.ProjectID != project && other.ID != currentID {
+			continue
+		}
+		if parentID, _ := m.listingParent(other); parentID != "" {
+			continue
+		}
+		add(other.ID, other.Title)
+	}
+	if currentID != "" {
+		add(currentID, currentTitle)
+	}
+	sort.SliceStable(roots, func(i, j int) bool {
+		return strings.ToLower(roots[i].title) < strings.ToLower(roots[j].title)
+	})
+	return append([]parentChoice{{title: "normal task"}}, roots...)
+}
+
 func (m model) parentFieldChoice() string {
-	if m.editTaskParentIdx != 0 {
+	if m.editTaskParentIdx < 0 || m.editTaskParentIdx >= len(m.editParentChoices) {
 		return "normal task"
 	}
-	if title := strings.TrimSpace(m.editTaskParentTitle); title != "" {
-		return "subtask of " + title
+	choice := m.editParentChoices[m.editTaskParentIdx]
+	if choice.id == "" {
+		return "normal task"
 	}
-	return "subtask"
+	return "subtask of " + choice.title
+}
+
+func (m model) chosenParentID() string {
+	if m.editTaskParentIdx < 0 || m.editTaskParentIdx >= len(m.editParentChoices) {
+		return ""
+	}
+	return m.editParentChoices[m.editTaskParentIdx].id
+}
+
+func (m *model) cycleEditParent(delta int) {
+	n := len(m.editParentChoices)
+	if n == 0 || delta == 0 {
+		return
+	}
+	m.editTaskParentIdx = (m.editTaskParentIdx + delta%n + n) % n
 }
 
 func (m model) nextTaskFormField(field, delta int) int {
@@ -369,58 +441,113 @@ func (m model) renderAddTaskForm(width, innerLines int) string {
 	if contentW < 20 {
 		contentW = 20
 	}
-	header := iconAdd + " New task"
-	if m.mode == modeEditTask {
-		header = iconEdit + " Edit task"
+	if m.taskFormUsesColumns(contentW) {
+		return m.renderAddTaskFormColumns(contentW, innerLines)
 	}
-	title := truncateInner(headerStyle.Render(header), contentW)
-	var lines []string
-	lines = append(lines, title, "")
-	selectedLine := 0
+	return m.renderAddTaskFormStacked(contentW, innerLines)
+}
 
+func (m model) taskFormUsesColumns(width int) bool {
+	return width >= 100
+}
+
+func (m model) renderAddTaskFormStacked(contentW, innerLines int) string {
+	notesHeight := max(innerLines/3, 8)
+	var lines []string
+	lines = append(lines, m.taskFormHeader(contentW), "")
+	selectedLine := 0
 	for i := 0; i < addTaskFieldCount; i++ {
-		if !m.taskFormFieldVisible(i) {
+		block := m.taskFormFieldBlock(i, contentW, notesHeight)
+		if len(block) == 0 {
 			continue
 		}
-		label := addTaskFieldLabels[i]
-		hint := addTaskFieldHints[i]
-		active := i == m.addTaskField
-		labelSt := hintStyle
-		if active {
-			labelSt = listSelStyle
+		if i == m.addTaskField {
 			selectedLine = len(lines)
 		}
-		lines = append(lines, truncateInner(labelSt.Render(fmt.Sprintf("%s  %s", label, hintStyle.Render("("+hint+")"))), contentW))
-		switch i {
-		case addTaskFieldTitle:
-			lines = append(lines, taskTitleInputView(m.taskTitleInput, contentW))
-		case addTaskFieldNotes:
-			lines = append(lines, taskNotesInputView(m.addTaskNotesInput, contentW)...)
-		case addTaskFieldDue:
-			lines = append(lines, truncateInner(m.addTaskDueInput.View(), contentW))
-		case addTaskFieldTime:
-			lines = append(lines, truncateInner(m.addTaskTimeInput.View(), contentW))
-		case addTaskFieldDuration:
-			lines = append(lines, truncateInner(m.addTaskDurationInput.View(), contentW))
-		case addTaskFieldFocus:
-			lines = append(lines, truncateInner(m.addTaskFocusInput.View(), contentW))
-		case addTaskFieldRepeat:
-			lines = append(lines, truncateInner(m.renderAddTaskChoice(addTaskRepeatOpts[m.addTaskRepeatIdx], active), contentW))
-		case addTaskFieldRepeatFrom:
-			lines = append(lines, truncateInner(m.renderAddTaskChoice(addTaskRepeatFromOpts[m.addTaskRepeatFromIdx].label, active), contentW))
-		case addTaskFieldRepeatRule:
-			lines = append(lines, truncateInner(m.addTaskRepeatInput.View(), contentW))
-		case addTaskFieldReminder:
-			lines = append(lines, truncateInner(m.renderAddTaskChoice(addTaskReminderOpts[m.addTaskReminderIdx].label, active), contentW))
-		case addTaskFieldPriority:
-			lines = append(lines, truncateInner(m.renderAddTaskChoice(addTaskPriorityOpts[m.addTaskPriorityIdx].label, active), contentW))
-		case addTaskFieldParent:
-			lines = append(lines, truncateInner(m.renderAddTaskChoice(m.parentFieldChoice(), active), contentW))
-		}
+		lines = append(lines, block...)
 		if i < addTaskFieldCount-1 {
 			lines = append(lines, "")
 		}
 	}
+	lines = append(lines, m.taskFormFooter(contentW)...)
+	return fitTaskForm(lines, selectedLine, contentW, innerLines)
+}
+
+func (m model) renderAddTaskFormColumns(contentW, innerLines int) string {
+	rightW := 48
+	if contentW < 120 {
+		rightW = 42
+	}
+	leftW := contentW - rightW - 2
+	header := []string{m.taskFormHeader(contentW), ""}
+	header = append(header, m.taskFormFieldBlock(addTaskFieldTitle, contentW, 1)...)
+	header = append(header, "")
+
+	sideFields := []int{
+		addTaskFieldDue,
+		addTaskFieldTime,
+		addTaskFieldDuration,
+		addTaskFieldFocus,
+		addTaskFieldRepeat,
+		addTaskFieldRepeatFrom,
+		addTaskFieldRepeatRule,
+		addTaskFieldReminder,
+		addTaskFieldPriority,
+		addTaskFieldParent,
+	}
+	var right []string
+	rightSelected := -1
+	for _, field := range sideFields {
+		block := m.taskFormFieldBlock(field, rightW, 1)
+		if len(block) == 0 {
+			continue
+		}
+		if len(right) > 0 {
+			right = append(right, "")
+		}
+		if field == m.addTaskField {
+			rightSelected = len(right)
+		}
+		right = append(right, block...)
+	}
+
+	notesHeight := max(innerLines-len(header)-2, 8)
+	if len(right) > notesHeight+1 {
+		notesHeight = len(right) - 1
+	}
+	maxNotes := innerLines - len(header) - 2
+	if maxNotes >= 8 && notesHeight > maxNotes {
+		notesHeight = maxNotes
+	}
+	left := m.taskFormFieldBlock(addTaskFieldNotes, leftW, notesHeight)
+	body := joinTaskFormColumns(left, right, leftW, rightW)
+
+	selectedLine := 0
+	switch m.addTaskField {
+	case addTaskFieldTitle:
+		selectedLine = 2
+	case addTaskFieldNotes:
+		selectedLine = len(header)
+	default:
+		if rightSelected >= 0 {
+			selectedLine = len(header) + rightSelected
+		}
+	}
+	lines := append(append([]string{}, header...), body...)
+	lines = append(lines, m.taskFormFooter(contentW)...)
+	return fitTaskForm(lines, selectedLine, contentW, innerLines)
+}
+
+func (m model) taskFormHeader(contentW int) string {
+	header := iconAdd + " New task"
+	if m.mode == modeEditTask {
+		header = iconEdit + " Edit task"
+	}
+	return truncateInner(headerStyle.Render(header), contentW)
+}
+
+func (m model) taskFormFooter(contentW int) []string {
+	var lines []string
 	if preview := m.taskFormPreview(); preview != "" {
 		lines = append(lines, "", truncateInner(sectionHeader("Plan preview", contentW), contentW))
 		lines = append(lines, truncateInner(hintStyle.Render(preview), contentW))
@@ -428,6 +555,67 @@ func (m model) renderAddTaskForm(width, innerLines int) string {
 	if h := m.keyHint("tab / shift+tab fields · enter save · ctrl+s save in notes · esc cancel · notes: enter = newline"); h != "" {
 		lines = append(lines, "", truncateInner(h, contentW))
 	}
+	return lines
+}
+
+func (m model) taskFormFieldBlock(field, contentW, notesHeight int) []string {
+	if !m.taskFormFieldVisible(field) {
+		return nil
+	}
+	active := field == m.addTaskField
+	labelSt := hintStyle
+	if active {
+		labelSt = listSelStyle
+	}
+	label := truncateInner(labelSt.Render(fmt.Sprintf("%s  %s", addTaskFieldLabels[field], hintStyle.Render("("+addTaskFieldHints[field]+")"))), contentW)
+	var body []string
+	switch field {
+	case addTaskFieldTitle:
+		body = []string{taskTitleInputView(m.taskTitleInput, contentW)}
+	case addTaskFieldNotes:
+		m.addTaskNotesInput.SetHeight(max(notesHeight, 1))
+		body = taskNotesInputView(m.addTaskNotesInput, contentW)
+	case addTaskFieldDue:
+		body = []string{truncateInner(m.addTaskDueInput.View(), contentW)}
+	case addTaskFieldTime:
+		body = []string{truncateInner(m.addTaskTimeInput.View(), contentW)}
+	case addTaskFieldDuration:
+		body = []string{truncateInner(m.addTaskDurationInput.View(), contentW)}
+	case addTaskFieldFocus:
+		body = []string{truncateInner(m.addTaskFocusInput.View(), contentW)}
+	case addTaskFieldRepeat:
+		body = []string{truncateInner(m.renderAddTaskChoice(addTaskRepeatOpts[m.addTaskRepeatIdx], active), contentW)}
+	case addTaskFieldRepeatFrom:
+		body = []string{truncateInner(m.renderAddTaskChoice(addTaskRepeatFromOpts[m.addTaskRepeatFromIdx].label, active), contentW)}
+	case addTaskFieldRepeatRule:
+		body = []string{truncateInner(m.addTaskRepeatInput.View(), contentW)}
+	case addTaskFieldReminder:
+		body = []string{truncateInner(m.renderAddTaskChoice(addTaskReminderOpts[m.addTaskReminderIdx].label, active), contentW)}
+	case addTaskFieldPriority:
+		body = []string{truncateInner(m.renderAddTaskChoice(addTaskPriorityOpts[m.addTaskPriorityIdx].label, active), contentW)}
+	case addTaskFieldParent:
+		body = []string{truncateInner(m.renderAddTaskChoice(m.parentFieldChoice(), active), contentW)}
+	}
+	return append([]string{label}, body...)
+}
+
+func joinTaskFormColumns(left, right []string, leftW, rightW int) []string {
+	n := max(len(left), len(right))
+	lines := make([]string, n)
+	for i := 0; i < n; i++ {
+		l, r := "", ""
+		if i < len(left) {
+			l = left[i]
+		}
+		if i < len(right) {
+			r = right[i]
+		}
+		lines[i] = padToWidth(l, leftW) + "  " + truncateInner(r, rightW)
+	}
+	return lines
+}
+
+func fitTaskForm(lines []string, selectedLine, contentW, innerLines int) string {
 	if len(lines) > innerLines {
 		window := computeScrollWindow(selectedLine, len(lines), innerLines)
 		visible := append([]string(nil), lines[window.Start:window.End]...)
@@ -502,11 +690,13 @@ func (m model) submitTaskForm() (model, tea.Cmd) {
 			m.errMsg = "no task selected"
 			return m, nil
 		}
+		chosen := m.chosenParentID()
 		return m, updateTaskCmd(
 			m.client, m.editTaskID, m.editProjectRef(), title, notes, priority,
 			sched, clearDue, recurrence, clearRecurrence, focusPlan,
-			m.editTaskParentID != "" && m.editTaskParentIdx != 0,
+			m.editTaskParentID != "" && chosen == "",
 			m.editTaskParentID,
+			chosen,
 		)
 	}
 	if m.projectID == "" {
@@ -581,7 +771,7 @@ func (m model) updateAddTaskForm(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, nil
 		}
 		if m.addTaskField == addTaskFieldParent {
-			m.editTaskParentIdx = 1 - m.editTaskParentIdx
+			m.cycleEditParent(-1)
 			return m, nil
 		}
 	case "]", "right":
@@ -602,7 +792,7 @@ func (m model) updateAddTaskForm(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, nil
 		}
 		if m.addTaskField == addTaskFieldParent {
-			m.editTaskParentIdx = 1 - m.editTaskParentIdx
+			m.cycleEditParent(1)
 			return m, nil
 		}
 	}
@@ -752,6 +942,7 @@ func updateTaskCmd(
 	focusPlan *ticktick.TaskFocusPlan,
 	clearParent bool,
 	oldParentID string,
+	parentID string,
 ) tea.Cmd {
 	return func() tea.Msg {
 		in := ticktick.TaskUpdateInput{
@@ -765,6 +956,7 @@ func updateTaskCmd(
 			FocusPlan:       focusPlan,
 			ClearParent:     clearParent,
 			OldParentID:     oldParentID,
+			ParentID:        parentID,
 		}
 		err := c.UpdateTask(taskID, projectID, in)
 		return taskUpdatedMsg{title: title, projectID: projectID, err: err}

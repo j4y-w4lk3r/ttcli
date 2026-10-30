@@ -96,11 +96,11 @@ func TestMCPInitializeListsToolsAndSkipsNotifications(t *testing.T) {
 	}
 }
 
-func TestTaskTextEditStoresPlainNotesAsHTML(t *testing.T) {
+func TestTaskTextEditKeepsNoteLineBreaks(t *testing.T) {
 	title := "Oat milk"
 	notes := "Oatly\n1L"
 	edit := taskTextEdit(&title, &notes)
-	if edit.Title == nil || *edit.Title != title || edit.Content == nil || *edit.Content != "Oatly<br/>1L" {
+	if edit.Title == nil || *edit.Title != title || edit.Content == nil || *edit.Content != "Oatly\n1L" {
 		t.Fatalf("edit=%+v content=%v", edit, edit.Content)
 	}
 	cleared := ""

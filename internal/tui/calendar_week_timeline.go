@@ -678,21 +678,115 @@ func calWeekViewportWindow(start, cursor, total, maxRows int) scrollWindow {
 }
 
 func renderCalWeekTaskLane(row calWeekVisualRow, sourceCursor int, colW [7]int, fullW int) string {
+	return renderCalWeekMixedLane(row, sourceCursor, [7]string{}, colW, fullW)
+}
+
+func renderCalWeekCountRow(counts [7]string, colW [7]int, fullW int) string {
+	return renderCalWeekMixedLane(calWeekVisualRow{kind: "tasks"}, -1, counts, colW, fullW)
+}
+
+func renderCalWeekMixedLane(row calWeekVisualRow, sourceCursor int, counts [7]string, colW [7]int, fullW int) string {
 	timeCol := hintStyle.Render(strings.Repeat(" ", dayTimeColW))
 	var cells [7]string
 	for dayIndex, cell := range row.cells {
-		if !cell.present {
+		cellW := calWeekCellContentWidth(colW[dayIndex], dayIndex)
+		if cell.present {
+			cells[dayIndex] = weekTaskCellSegment(
+				cell.row,
+				cellW,
+				cell.sourceIndex == sourceCursor,
+				cell.continuation,
+				cell.last,
+			)
 			continue
 		}
-		cells[dayIndex] = weekTaskCellSegment(
-			cell.row,
-			calWeekCellContentWidth(colW[dayIndex], dayIndex),
-			cell.sourceIndex == sourceCursor,
-			cell.continuation,
-			cell.last,
-		)
+		if counts[dayIndex] == "" {
+			continue
+		}
+		cells[dayIndex] = truncateRenderedWidth(hintStyle.Render(counts[dayIndex]), cellW)
 	}
 	return padToWidth(timeCol+dayTimelineGap()+renderCalWeekColumns(cells, colW), fullW)
+}
+
+func calWeekCountUsed(counts [7]string) bool {
+	for _, count := range counts {
+		if count != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// A day with one all-day task keeps that title. A longer list collapses to a
+// count until one of its tasks is selected, then that task and "+N more" show.
+func calWeekAllDayCells(rows []calWeekIndexedRow, cursor int) (visible []calWeekIndexedRow, inline, extra [7]string) {
+	var byDay [7][]calWeekIndexedRow
+	for _, row := range rows {
+		day := clamp(row.row.dayIndex, 0, 6)
+		byDay[day] = append(byDay[day], row)
+	}
+	for day := 0; day < 7; day++ {
+		items := byDay[day]
+		n := len(items)
+		if n == 0 {
+			continue
+		}
+		if n == 1 {
+			visible = append(visible, items[0])
+			continue
+		}
+		selected := -1
+		for i, item := range items {
+			if item.sourceIndex == cursor {
+				selected = i
+				break
+			}
+		}
+		if selected >= 0 {
+			visible = append(visible, items[selected])
+			extra[day] = fmt.Sprintf("+%d more", n-1)
+			continue
+		}
+		inline[day] = fmt.Sprintf("%d tasks", n)
+	}
+	return visible, inline, extra
+}
+
+func renderCalWeekAllDayBand(rows []calWeekRow, timelineStart, cursor int, colW [7]int, fullW int) (string, int) {
+	var indexed []calWeekIndexedRow
+	for i := 1; i < timelineStart; i++ {
+		if rows[i].kind != "allday" {
+			continue
+		}
+		indexed = append(indexed, calWeekIndexedRow{row: rows[i], sourceIndex: i, last: true})
+	}
+	visible, inline, extra := calWeekAllDayCells(indexed, cursor)
+	var b strings.Builder
+	lines := 0
+	lanes := packCalWeekTaskLanes(visible)
+	if len(lanes) == 0 {
+		if calWeekCountUsed(inline) {
+			b.WriteString(renderCalWeekCountRow(inline, colW, fullW))
+			b.WriteString("\n")
+			lines++
+		}
+	} else {
+		for i, lane := range lanes {
+			counts := [7]string{}
+			if i == 0 {
+				counts = inline
+			}
+			b.WriteString(renderCalWeekMixedLane(lane, cursor, counts, colW, fullW))
+			b.WriteString("\n")
+			lines++
+		}
+	}
+	if calWeekCountUsed(extra) {
+		b.WriteString(renderCalWeekCountRow(extra, colW, fullW))
+		b.WriteString("\n")
+		lines++
+	}
+	return b.String(), lines
 }
 
 func (m model) calWeekRows(idx calIndex) []calWeekRow {
@@ -720,21 +814,12 @@ func (m model) renderCalWeekTimeline(idx calIndex, layout layout) string {
 	b.WriteString("\n")
 	b.WriteString(renderCalWeekAllDayRow(rows[0], false, colW, fullRowW))
 	b.WriteString("\n")
-	var indexedAllDay []calWeekIndexedRow
-	for i := 1; i < timelineStart; i++ {
-		if rows[i].kind == "allday" {
-			indexedAllDay = append(indexedAllDay, calWeekIndexedRow{row: rows[i], sourceIndex: i, last: true})
-		}
-	}
-	allDayLanes := packCalWeekTaskLanes(indexedAllDay)
-	for _, lane := range allDayLanes {
-		b.WriteString(renderCalWeekTaskLane(lane, cursor, colW, fullRowW))
-		b.WriteString("\n")
-	}
+	allDayBand, allDayLines := renderCalWeekAllDayBand(rows, timelineStart, cursor, colW, fullRowW)
+	b.WriteString(allDayBand)
 	b.WriteString(renderCalWeekCapacityRow(idx, start, now, config, colW, fullRowW))
 	b.WriteString("\n")
 
-	stickyLines := 3 + len(allDayLanes)
+	stickyLines := 3 + allDayLines
 	maxRows := layout.innerLines - stickyLines - 7
 	if maxRows < 5 {
 		maxRows = 5

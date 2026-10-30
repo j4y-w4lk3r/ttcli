@@ -134,6 +134,7 @@ type model struct {
 	editTaskParentID     string
 	editTaskParentTitle  string
 	editTaskParentIdx    int
+	editParentChoices    []parentChoice
 	filterInput          textinput.Model
 	listSearchInput      textinput.Model
 	listSearchCursor     int
@@ -143,7 +144,9 @@ type model struct {
 	addListFolder string // folder context when creating a list
 
 	listPickerPurpose     listPickerPurpose
+	listPickerAll         []listPickerRow
 	listPickerRows        []listPickerRow
+	listPickerQuery       string
 	listPickerCursor      int
 	listPickerTaskIDs     []string
 	listPickerMoveTasks   []ticktick.Task
@@ -563,6 +566,13 @@ type taskUpdatedMsg struct {
 	title     string
 	projectID string
 	err       error
+}
+
+type dueTodayMsg struct {
+	count    int
+	restored bool
+	err      error
+	nextUndo *taskUndo
 }
 
 type taskRenamedMsg struct {
@@ -1957,6 +1967,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.toast = fmt.Sprintf("%s updated %q", iconCheck, msg.title)
 		return m, m.reloadCurrentTasks(false)
 
+	case dueTodayMsg:
+		if msg.count > 0 && m.repo != nil {
+			m.repo.InvalidateTasks(m.projectID)
+		}
+		if msg.restored {
+			if msg.err != nil {
+				m.errMsg = msg.err.Error()
+			} else {
+				m.toast = iconCheck + " due date restored"
+			}
+			return m, m.reloadCurrentTasks(false)
+		}
+		if msg.err != nil {
+			m.errMsg = msg.err.Error()
+			if msg.count > 0 {
+				m.noteTaskUndo(msg.nextUndo, "due date partly updated")
+			}
+			return m, m.reloadCurrentTasks(false)
+		}
+		if msg.count == 0 {
+			m.toast = "already due today"
+			return m, nil
+		}
+		label := "due today"
+		if msg.count > 1 {
+			label = fmt.Sprintf("%d tasks due today", msg.count)
+		}
+		m.noteTaskUndo(msg.nextUndo, iconCheck+" "+label)
+		return m, m.reloadCurrentTasks(false)
+
 	case taskRenamedMsg:
 		m.mode = modeNormal
 		m.renameInput.Blur()
@@ -2767,6 +2807,36 @@ func (m model) updateTasksKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, undoDeletedListCmd(m.client, m.listStore)
 		}
 		return m, nil
+	case "t":
+		if m.paneFocus != paneTasks {
+			return m, nil
+		}
+		if m.effectiveTaskScope() == TaskScopeArchive {
+			m.errMsg = "archive records are durable recovery snapshots"
+			return m, nil
+		}
+		if m.viewingTrash() || m.selectionIsTrashed() {
+			m.errMsg = "task is in trash"
+			return m, nil
+		}
+		tasks := m.tasksToSchedule()
+		if len(tasks) == 0 {
+			m.errMsg = "select a task"
+			return m, nil
+		}
+		today := dateOnly(time.Now())
+		var pending []ticktick.Task
+		for _, task := range tasks {
+			if !taskDueOnDay(task, today) {
+				pending = append(pending, task)
+			}
+		}
+		if len(pending) == 0 {
+			m.toast = "already due today"
+			return m, nil
+		}
+		m.toast = "setting due to today…"
+		return m, setDueTodayCmd(m.client, pending, today)
 	case "w":
 		if m.paneFocus != paneTasks {
 			return m, nil
@@ -3222,6 +3292,24 @@ func (m model) updatePomoKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.errMsg = "settings: " + err.Error()
 		} else {
 			m.toast = pomoFocusDesignToast(design)
+		}
+		return m, nil
+	case "b", "B":
+		anchorHour := m.pomoVisibleAnchorHour(grid)
+		design := m.pomoLogDesign().Next()
+		m.uiSettings.PomoLogDesign = design
+		if err := saveUISettings(m.uiSettings); err != nil {
+			m.errMsg = "settings: " + err.Error()
+		} else {
+			m.toast = "timeline · " + design.Label()
+		}
+		if m.pomoFollowNow {
+			m.centerPomoTimelineOnNow()
+		} else {
+			newGrid := m.pomoDayGrid()
+			m.pomoViewport = gridRowForHour(newGrid, anchorHour)
+			m.pomoGridCursor = clamp(m.pomoGridCursor, 0, max(len(newGrid)-1, 0))
+			m.followPomoViewport(newGrid)
 		}
 		return m, nil
 	case "z", "Z":

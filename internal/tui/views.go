@@ -296,7 +296,7 @@ func footerHint(v appView) string {
 	case viewHabits:
 		return "? help · j/k · space check-in · e rename · x delete · 1-4 · r refresh · q quit"
 	default:
-		return "? help · h/l panes · c/C scope · / search · d done/restore/recreate · x check-in · space mark · Backspace trash/delete · 1-4 · r refresh · q quit"
+		return "? help · h/l panes · c/C scope · / search · d done/restore/recreate · t due today · x check-in · space mark · Backspace trash/delete · 1-4 · r refresh · q quit"
 	}
 }
 

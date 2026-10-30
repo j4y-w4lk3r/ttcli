@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"time"
+
 	"github.com/j4y-w4lk3r/ttcli/internal/focus"
 )
 
@@ -70,7 +72,23 @@ func (m model) pomoDayGridFor(innerLines int) []dayGridRow {
 	}
 	pauses, _ := focus.PauseSpellsForTimeline(m.pomoViewDate, live, anchor)
 	grid := buildDayGrid(m.focusStatsRecords(), pauses, anchor, live, m.pomoViewIsToday())
-	return expandPomoGrid(grid, m.pomoTimelineGapLines(innerLines))
+	return m.pomoDisplayGrid(grid, innerLines, anchor)
+}
+
+func (m model) pomoDisplayGrid(compact []dayGridRow, innerLines int, anchor time.Time) []dayGridRow {
+	showNow := m.pomoViewIsToday()
+	switch m.pomoLogDesign() {
+	case PomoLogSessions, PomoLogTape:
+		return buildPomoLogList(compact, anchor, showNow, false)
+	case PomoLogHours, PomoLogCards:
+		return buildPomoLogList(compact, anchor, showNow, true)
+	default:
+		grid := expandPomoGrid(compact, m.pomoTimelineGapLines(innerLines))
+		if showNow {
+			grid = placePomoNowDot(grid, anchor)
+		}
+		return grid
+	}
 }
 
 func fillPomoTimelineStretch(lines []string, maxLines, width int, busy bool) []string {
@@ -79,7 +97,7 @@ func fillPomoTimelineStretch(lines []string, maxLines, width int, busy bool) []s
 	}
 	out := append([]string(nil), lines...)
 	for len(out) < maxLines {
-		out = append(out, renderHourSlotGapRow(width, busy, false))
+		out = append(out, renderHourSlotGapRow(width, busy, false, false))
 	}
 	if len(out) > maxLines {
 		out = out[:maxLines]
