@@ -49,7 +49,7 @@ func printHelp(w io.Writer) {
 		{
 			head: "getting started",
 			lines: []string{
-				"ttcli login              mint session (1Password)",
+				"ttcli login              mint session (1Password or --password-stdin)",
 				"ttcli status [--ping]    version + auth health",
 				"ttcli tree               folder → list tree",
 			},

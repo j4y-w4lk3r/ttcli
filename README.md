@@ -66,11 +66,24 @@ export TTCLI_OP_VAULT=Employee
 export TTCLI_OP_ITEM=TickTick
 ```
 
+Without 1Password, pipe the password in (keyhole, OpenBao, anything that prints it):
+
+```bash
+keyhole get VAULT -i IDENTITY ticktick | ttcli login --email you@example.com --password-stdin
+bao kv get -field=password secret/ticktick | ttcli login --email you@example.com --password-stdin
+```
+
+`--password-stdin` refuses a terminal and anything but one line, so the password
+never lands on the command line (`ps`), in shell history or in scrollback.
+`--password` still works but warns, because other programs can read it from `ps`.
+
 **Note:** if you have an older Homebrew `ttcli` on PATH, rebuild from source:
 `make install` then run `~/go/bin/ttcli login` (or `hash -r` so go/bin wins).
 
 With a valid session on disk, `ttcli` **auto-refreshes** on `401` by re-reading
 1Password — so a long-running box keeps working without manual re-login.
+After a `--password-stdin` login there is nothing to re-read: when the session
+expires, run the same pipe again.
 
 A captured session is read from the first of:
 

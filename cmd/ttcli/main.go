@@ -42,13 +42,30 @@ func cmdLogin(args []string) error {
 	vault := fs.String("vault", "", "1Password vault (default Private, or $TTCLI_OP_VAULT)")
 	item := fs.String("item", "", "1Password Login item title or id (default TickTick, or $TTCLI_OP_ITEM)")
 	email := fs.String("email", "", "TickTick email (skip 1Password; requires --password)")
-	pass := fs.String("password", "", "TickTick password (skip 1Password; requires --email)")
+	pass := fs.String("password", "", "TickTick password (visible to other programs in ps; prefer --password-stdin)")
+	passStdin := fs.Bool("password-stdin", false, "read the password from a pipe, e.g. keyhole get ... | ttcli login --email E --password-stdin (requires --email)")
 	out := fs.String("out", "", "path to write the session file (default ~/.ticktick_auth.json)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	password := *pass
+	if *passStdin {
+		if *pass != "" {
+			return fmt.Errorf("use either --password or --password-stdin, not both")
+		}
+		if *email == "" {
+			return fmt.Errorf("--password-stdin requires --email")
+		}
+		p, err := passwordFromStdin()
+		if err != nil {
+			return err
+		}
+		password = p
+	} else if *pass != "" {
+		fmt.Fprintln(os.Stderr, "ttcli: warning: --password is visible to other programs (ps); prefer --password-stdin")
+	}
 	opts := ticktick.CredentialOptions{
-		Vault: *vault, Item: *item, Email: *email, Password: *pass,
+		Vault: *vault, Item: *item, Email: *email, Password: password,
 	}
 	c, err := ticktick.Login(opts, *out)
 	if err != nil {

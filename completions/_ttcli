@@ -8,7 +8,7 @@
 _ttcli() {
   local -a commands subcmd
   commands=(
-    'login:1Password session'
+    'login:session (1Password or --password-stdin)'
     'status:version and auth health'
     'ls:list projects'
     'tree:folder tree'

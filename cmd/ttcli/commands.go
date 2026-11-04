@@ -23,7 +23,7 @@ var commandGroups = []struct {
 
 func allCommands() []commandHelp {
 	return []commandHelp{
-		{Name: "login", Group: "getting started", Summary: "Mint session via 1Password", Usage: "ttcli login [--vault V] [--item I]", Examples: []string{"ttcli login", "ttcli login --vault Employee --item TickTick"}},
+		{Name: "login", Group: "getting started", Summary: "Mint session via 1Password or a password pipe", Usage: "ttcli login [--vault V] [--item I] | ttcli login --email E --password-stdin", Examples: []string{"ttcli login", "ttcli login --vault Employee --item TickTick", "keyhole get VAULT -i ID ticktick | ttcli login --email you@example.com --password-stdin"}},
 		{Name: "status", Group: "getting started", Summary: "Version + session health", Usage: "ttcli status [--ping]", Examples: []string{"ttcli status", "ttcli status --ping"}},
 		{Name: "tree", Group: "lists & folders", Summary: "Folder → list tree", Usage: "ttcli tree", Aliases: []string{"folders"}, Examples: []string{"ttcli tree", "ttcli ls --tree"}},
 		{Name: "ls", Group: "lists & folders", Summary: "List projects (flat)", Usage: "ttcli ls [--tree] [--names] [--all]", Aliases: []string{"lists", "projects"}, Examples: []string{"ttcli ls", "ttcli ls --names"}},

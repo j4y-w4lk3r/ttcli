@@ -42,7 +42,7 @@ const (
 
 	// xDevice mirrors the web client's device descriptor; signon rejects
 	// requests without a plausible X-Device header.
-	xDevice = `{"platform":"web","os":"macOS 10.15.7","device":"Chrome 138.0.0.0","name":"","version":6360,"id":"68983d411ca57e044a5fa842","channel":"website","campaign":"","websocket":""}`
+	xDevice = `{"platform":"web","os":"macOS 10.15.7","device":"Chrome 138.0.0.0","name":"","version":8020,"id":"68983d411ca57e044a5fa842","channel":"website","campaign":"","websocket":""}`
 
 	ticktickTimeLayout = "2006-01-02T15:04:05.000-0700"
 )
