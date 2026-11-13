@@ -316,6 +316,7 @@ func cmdAdd(args []string) error {
 	// otherwise swallow trailing flags into the title).
 	project, prio, note := "", "none", ""
 	var titleParts []string
+	endOfFlags := false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		next := func() string {
@@ -325,7 +326,13 @@ func cmdAdd(args []string) error {
 			}
 			return ""
 		}
+		if endOfFlags {
+			titleParts = append(titleParts, a)
+			continue
+		}
 		switch a {
+		case "--":
+			endOfFlags = true
 		case "-p", "--project":
 			project = next()
 		case "-P", "--priority":
@@ -333,6 +340,10 @@ func cmdAdd(args []string) error {
 		case "-n", "--note":
 			note = next()
 		default:
+			// An unknown flag is a typo, not part of the title.
+			if strings.HasPrefix(a, "-") && len(a) > 1 {
+				return fmt.Errorf("unknown flag %q for add (a title starting with '-' goes after --: ttcli add -- %s)", a, a)
+			}
 			titleParts = append(titleParts, a)
 		}
 	}

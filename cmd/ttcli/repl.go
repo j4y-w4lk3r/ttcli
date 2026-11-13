@@ -51,6 +51,14 @@ func runCommand(args []string) error {
 	if len(args) == 0 {
 		return nil
 	}
+	// `ttcli <cmd> --help` (or -h) anywhere before a literal "--" shows that
+	// command's help and never runs it. Without this, `ttcli add --help`
+	// created a task titled "--help".
+	if args[0] != "help" && wantsHelp(args[1:]) {
+		if _, ok := lookupCommand(args[0]); ok {
+			return cmdHelp(args[:1])
+		}
+	}
 	switch args[0] {
 	case "help", "-h", "--help":
 		return cmdHelp(args[1:])
@@ -140,4 +148,17 @@ func splitShellLine(line string) []string {
 		out = append(out, cur.String())
 	}
 	return out
+}
+
+// wantsHelp reports whether -h or --help appears before a "--" end-of-flags marker.
+func wantsHelp(args []string) bool {
+	for _, a := range args {
+		if a == "--" {
+			return false
+		}
+		if a == "-h" || a == "--help" {
+			return true
+		}
+	}
+	return false
 }
